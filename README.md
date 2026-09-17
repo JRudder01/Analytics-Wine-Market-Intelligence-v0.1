@@ -1,4 +1,4 @@
-# Rudder Analytics — Wine Market Intelligence v0.3
+# Rudder Analytics — Wine Market Intelligence v0.3.1
 
 v0.3 adds **AI Screenshot Intake** to the v0.2 comparable-market/public-data architecture. A Rudder administrator can upload 1–4 screenshots of one wine product/shop page, have OpenAI vision extract only visibly supported facts, review/edit the proposed comp row, and add the approved observation to the current Data Hub session.
 
@@ -131,3 +131,11 @@ The v0.2 public-data workflow is unchanged: BLS, TTB and USDA/NASS feeds are dow
 Streamlit Community Cloud has an ephemeral filesystem. For v0.3, clicking **Approve** changes the Data Hub session only. Persist the new rows by downloading the merged `wine_comps.csv` and committing it to GitHub.
 
 A later Supabase/PostgreSQL phase can turn approval into a permanent database insert without the download/commit step.
+
+
+## v0.3.1 additions
+
+- Clipboard screenshot intake via a **Paste screenshot from clipboard** button (HTTPS/browser Clipboard API required).
+- Up to four screenshots can be combined across file uploads and clipboard pastes.
+- Clipboard screenshots can be previewed and cleared before extraction.
+- Estate classification is stricter: component vineyard/source wording such as "from Eberle Estate" no longer marks the finished wine Estate. Estate now requires the wine name itself or clear whole-wine estate-grown/estate-bottled evidence.

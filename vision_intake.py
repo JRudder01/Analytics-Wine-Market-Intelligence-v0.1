@@ -78,9 +78,9 @@ Rules:
 - explicit_price_label should contain only a visible label such as MSRP, SRP, Suggested Retail, List Price, Retail, or null. Do not invent a label.
 - critic_name/critic_score are for named editorial wine critics/publications. Do NOT put wine-competition scores there. Put competition medals/scores in competition_awards.
 - vineyard_sources should contain named vineyard/source locations explicitly stated for the finished wine or its components.
-- estate_evidence should quote or briefly paraphrase visible wording supporting an Estate designation/source, or be null.
+- estate_evidence is ONLY for evidence that the FINISHED WINE is estate-designated or that all fruit for the finished wine is explicitly estate-grown/estate-sourced. Do NOT treat a component vineyard/source such as "Picpoul is from Eberle Estate", a winery name containing Estate, or a named "Estate Vineyard" by itself as proof that the finished wine is Estate. In those cases use null unless the wine title/designation itself says Estate or the page explicitly says the finished wine is estate-grown/estate-bottled/100% estate.
 - single_vineyard_evidence should contain visible wording that clearly ties the finished wine to one named vineyard. If multiple vineyard sources are shown, note that in warnings and use null unless the page explicitly calls the finished wine single-vineyard.
-- tier_evidence should contain visible words such as Flagship, Reserve, Estate, Limited Release, Cellar Club, icon, benchmark, etc. Otherwise null.
+- tier_evidence should contain visible words that describe the FINISHED WINE's market tier, such as Flagship, Reserve, Estate, Limited Release, Cellar Club, icon, benchmark, etc. Do not use "Estate" from a component vineyard/source as tier evidence. Otherwise null.
 - Keep names faithful to the page. Do not rewrite branding.
 - A screenshot can contain several sections of one product page; combine them into one product record.
 - If screenshots appear to show more than one different wine, lower confidence and warn the reviewer.
@@ -110,11 +110,25 @@ def get_default_model() -> str:
         return "gpt-5.6-terra"
 
 
-def _image_to_data_url(uploaded_file, max_dimension: int = 2600) -> str:
-    """Resize very large screenshots while retaining enough text detail for vision."""
-    raw = uploaded_file.getvalue()
-    image = Image.open(io.BytesIO(raw))
-    image.load()
+def _image_to_data_url(image_input, max_dimension: int = 2600) -> str:
+    """Resize screenshots while retaining enough text detail for vision.
+
+    Supports Streamlit UploadedFile objects, raw bytes, file-like objects, and
+    PIL images (used by the clipboard-paste component).
+    """
+    if isinstance(image_input, Image.Image):
+        image = image_input.copy()
+    else:
+        if isinstance(image_input, (bytes, bytearray)):
+            raw = bytes(image_input)
+        elif hasattr(image_input, "getvalue"):
+            raw = image_input.getvalue()
+        elif hasattr(image_input, "read"):
+            raw = image_input.read()
+        else:
+            raise TypeError(f"Unsupported image input type: {type(image_input).__name__}")
+        image = Image.open(io.BytesIO(raw))
+        image.load()
     if image.mode not in ("RGB", "RGBA"):
         image = image.convert("RGB")
 
@@ -252,24 +266,49 @@ def infer_general_category(graph_category: str, varietal_text: str = "", wine_na
     return "Red"
 
 
+def infer_estate(wine_name: str, estate_evidence: str | None) -> bool:
+    """Classify Estate only from finished-wine evidence, not component sources.
+
+    Strongest rule: an explicit Estate designation in the wine/label name.
+    Otherwise, require wording that clearly applies estate status to the whole wine.
+    A bare vineyard/source phrase such as "Eberle Estate" or "Estate Vineyard"
+    is intentionally insufficient on its own.
+    """
+    name = _text(wine_name).lower()
+    evidence = _text(estate_evidence).lower()
+
+    if re.search(r"\bestate\b", name):
+        return True
+    if not evidence:
+        return False
+
+    whole_wine_patterns = [
+        r"\bestate[- ]grown\b",
+        r"\bestate[- ]bottled\b",
+        r"\bestate wine\b",
+        r"\bestate designation\b",
+        r"\b100%[^.]{0,40}\bestate\b",
+        r"\ball (?:fruit|grapes)[^.]{0,50}\bestate\b",
+        r"\b(?:entirely|exclusively)[^.]{0,50}\bestate\b",
+        r"\bfrom (?:our|the) estate vineyard(?:s)?\b",
+        r"\bsourced (?:entirely|exclusively) from[^.]{0,50}\bestate\b",
+    ]
+    return any(re.search(pattern, evidence) for pattern in whole_wine_patterns)
+
+
 def infer_product_tier(wine_name: str, tier_evidence: str | None, estate_evidence: str | None) -> str:
     text = f"{wine_name} {_text(tier_evidence)}".lower()
     if any(t in text for t in ["flagship", "icon wine", "iconic", "benchmark", "top wine"]):
         return "Flagship"
     if "reserve" in text:
         return "Reserve"
-    if "estate" in text or _text(estate_evidence):
+    if infer_estate(wine_name, estate_evidence):
         return "Estate"
     if any(t in text for t in ["limited", "cellar club", "small production", "small-production", "special release"]):
         return "Limited"
     if any(t in text for t in ["value", "entry level", "entry-level"]):
         return "Value/Core"
     return "Core"
-
-
-def infer_estate(wine_name: str, estate_evidence: str | None) -> bool:
-    text = f"{wine_name} {_text(estate_evidence)}".lower()
-    return bool("estate" in text)
 
 
 def infer_single_vineyard(extraction: dict[str, Any]) -> bool:

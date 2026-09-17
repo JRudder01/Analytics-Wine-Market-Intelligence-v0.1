@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import io
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+
+try:
+    from streamlit_paste_button import paste_image_button
+except Exception:
+    paste_image_button = None
 
 from data_loader import (
     load_comps,
@@ -290,6 +298,11 @@ elif page == "Data Hub (Admin)":
     st.markdown("### Screenshot Intake")
     st.caption("Upload screenshots you manually captured from a wine product/shop page. AI extracts visible facts, then Rudder applies our classification rules. Nothing is saved until you review and approve it.")
 
+    if "vision_pasted_images" not in st.session_state:
+        st.session_state.vision_pasted_images = []
+    if "vision_last_paste_hash" not in st.session_state:
+        st.session_state.vision_last_paste_hash = ""
+
     ss1, ss2 = st.columns([1.25, 1])
     with ss1:
         shot_files = st.file_uploader(
@@ -299,6 +312,47 @@ elif page == "Data Hub (Admin)":
             key="vision_shots",
             help="Use screenshots from one wine/product page at a time. Include price/spec sections when possible.",
         )
+
+        st.caption("Or copy a screenshot to your clipboard and add it directly.")
+        if paste_image_button is not None:
+            pasted = paste_image_button(
+                label="📋 Paste screenshot from clipboard",
+                text_color="#ffffff",
+                background_color="#285873",
+                hover_background_color="#1f465d",
+                key="vision_clipboard_paste",
+                errors="raise",
+            )
+            if pasted.image_data is not None:
+                buffer = io.BytesIO()
+                pasted.image_data.save(buffer, format="PNG")
+                pasted_bytes = buffer.getvalue()
+                paste_hash = hashlib.sha256(pasted_bytes).hexdigest()
+                existing_count = len(shot_files or []) + len(st.session_state.vision_pasted_images)
+                if paste_hash != st.session_state.vision_last_paste_hash:
+                    if existing_count >= 4:
+                        st.warning("A maximum of four screenshots can be used for one wine. Clear one before pasting another.")
+                    else:
+                        st.session_state.vision_pasted_images.append({
+                            "name": f"Clipboard screenshot {len(st.session_state.vision_pasted_images) + 1}",
+                            "bytes": pasted_bytes,
+                            "hash": paste_hash,
+                        })
+                        st.session_state.vision_last_paste_hash = paste_hash
+        else:
+            st.info("Clipboard paste is unavailable until the streamlit-paste-button dependency is installed. File upload still works normally.")
+
+        if st.session_state.vision_pasted_images:
+            with st.expander(f"Clipboard screenshots ({len(st.session_state.vision_pasted_images)})", expanded=True):
+                preview_cols = st.columns(min(4, len(st.session_state.vision_pasted_images)))
+                for idx, item in enumerate(st.session_state.vision_pasted_images):
+                    with preview_cols[idx % len(preview_cols)]:
+                        st.image(item["bytes"], caption=item["name"], use_container_width=True)
+                if st.button("Clear clipboard screenshots", key="clear_vision_clipboard"):
+                    st.session_state.vision_pasted_images = []
+                    st.session_state.vision_last_paste_hash = ""
+                    st.rerun()
+
         vision_source_url = st.text_input(
             "Source URL",
             key="vision_source_url",
@@ -327,19 +381,23 @@ elif page == "Data Hub (Admin)":
             help="Terra is the default balance of extraction quality and cost. Luna is cheaper; Sol is more capable but more expensive.",
         )
 
-    if shot_files:
-        st.caption(f"{len(shot_files)} screenshot(s) selected. Screenshot content is sent to the configured OpenAI API model only when you click Extract.")
+    combined_shots = list(shot_files or []) + [item["bytes"] for item in st.session_state.vision_pasted_images]
+    too_many_shots = len(combined_shots) > 4
+    if combined_shots:
+        st.caption(f"{len(combined_shots)} screenshot(s) ready. Screenshot content is sent to the configured OpenAI API model only when you click Extract.")
+    if too_many_shots:
+        st.warning("Use no more than four screenshots for one wine. Remove an uploaded file or clear a clipboard screenshot before extracting.")
 
     extract_clicked = st.button(
         "Extract wine details with AI",
         type="primary",
-        disabled=not shot_files,
+        disabled=(not combined_shots) or too_many_shots,
         key="vision_extract_btn",
     )
     if extract_clicked:
         try:
             with st.spinner("Reading the screenshots and structuring the visible wine details..."):
-                extracted = extract_wine_from_images(shot_files, model=vision_model)
+                extracted = extract_wine_from_images(combined_shots, model=vision_model)
             st.session_state.vision_extraction = extracted
             st.session_state.vision_extraction_source_url = vision_source_url
             st.session_state.vision_extraction_source_kind = vision_source_kind
@@ -362,6 +420,8 @@ elif page == "Data Hub (Admin)":
         if warnings:
             for warning in warnings:
                 st.warning(f"Vision review note: {warning}")
+        if extracted.get("estate_evidence") and not proposed.get("estate"):
+            st.info("Estate wording was detected, but Rudder did not mark the finished wine as Estate because the evidence did not clearly designate the whole wine as estate-grown/estate-bottled or include Estate in the wine name.")
 
         with st.expander("Extraction evidence / non-model fields", expanded=False):
             st.write(f"**Overall vision confidence:** {extracted.get('overall_confidence', 'Moderate')}")
