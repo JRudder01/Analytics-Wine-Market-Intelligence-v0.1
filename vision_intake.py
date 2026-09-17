@@ -9,6 +9,7 @@ from datetime import date
 from typing import Any
 
 from PIL import Image
+import pandas as pd
 
 TIERS = ["Value/Core", "Core", "Estate", "Limited", "Reserve", "Flagship"]
 PRICE_TYPES = [
@@ -375,7 +376,7 @@ def build_comp_record(
 
 
 def duplicate_matches(all_data, record: dict[str, Any]):
-    """Return same winery + label + vintage rows for a reviewer warning."""
+    """Return same winery + label + vintage rows for reviewer display."""
     if all_data is None or all_data.empty:
         return all_data.iloc[0:0] if all_data is not None else None
     winery = _text(record.get("winery")).casefold()
@@ -389,3 +390,87 @@ def duplicate_matches(all_data, record: dict[str, Any]):
         numeric_vintage = all_data["vintage"]
         mask &= numeric_vintage.eq(float(vintage))
     return all_data.loc[mask].copy()
+
+
+def _norm_source(value: Any) -> str:
+    return re.sub(r"\s+", " ", _text(value).casefold()).strip()
+
+
+def _source_scope(record: dict[str, Any]) -> str:
+    """Identify the source whose price is being observed.
+
+    Winery-direct price types are scoped to the winery itself. Third-party observed
+    retail prices are scoped to the merchant/source so multiple retailers can coexist.
+    """
+    price_type = _text(record.get("price_type")).casefold()
+    winery_direct = {
+        "winery msrp", "winery retail", "wine club/member price",
+        "historical listed price",
+    }
+    if price_type in winery_direct:
+        return f"winery::{_norm_source(record.get('winery'))}"
+    url = _text(record.get("source_url"))
+    if url:
+        m = re.match(r"https?://([^/]+)", url.casefold())
+        if m:
+            return f"site::{m.group(1).removeprefix('www.')}"
+    return f"source::{_norm_source(record.get('source_name'))}"
+
+
+def classify_existing_observation(all_data, record: dict[str, Any]) -> dict[str, Any]:
+    """Classify a proposed observation against the current comp database.
+
+    Status values:
+    - new: no same winery/wine/vintage observation exists.
+    - exact_duplicate: same price type/source scope and same price already exists.
+    - price_update: same price type/source scope exists at a different price.
+    - alternate_price_type: same wine/vintage exists, but this price type is new.
+    - corroborating_source: same price type exists from a different third-party source.
+
+    Old price observations are preserved. Current-market analysis later selects the
+    newest observation for each source/price-type identity.
+    """
+    matches = duplicate_matches(all_data, record)
+    if matches is None or matches.empty:
+        return {"status": "new", "matches": matches, "same_type": matches, "latest": None}
+
+    price_type = _text(record.get("price_type")).casefold()
+    new_scope = _source_scope(record)
+    new_price = record.get("price")
+    try:
+        new_price = float(new_price)
+    except Exception:
+        new_price = None
+
+    same_type = matches[matches["price_type"].fillna("").astype(str).str.strip().str.casefold().eq(price_type)].copy()
+    if same_type.empty:
+        return {"status": "alternate_price_type", "matches": matches, "same_type": same_type, "latest": None}
+
+    def row_scope(row):
+        return _source_scope(row.to_dict())
+
+    same_type["_source_scope"] = same_type.apply(row_scope, axis=1)
+    same_scope = same_type[same_type["_source_scope"].eq(new_scope)].copy()
+
+    # Third-party sources can provide independent market observations.
+    if same_scope.empty:
+        return {"status": "corroborating_source", "matches": matches, "same_type": same_type.drop(columns=["_source_scope"]), "latest": None}
+
+    same_scope["_parsed_date"] = pd.to_datetime(same_scope.get("price_date", ""), errors="coerce")
+    same_scope = same_scope.sort_values("_parsed_date", ascending=False, na_position="last")
+    latest_row = same_scope.iloc[0].drop(labels=[c for c in ["_source_scope", "_parsed_date"] if c in same_scope.columns]).to_dict()
+
+    if new_price is not None and same_scope["price"].apply(lambda x: abs(float(x) - new_price) < 0.005 if pd.notna(x) else False).any():
+        return {
+            "status": "exact_duplicate",
+            "matches": matches,
+            "same_type": same_scope.drop(columns=["_source_scope", "_parsed_date"], errors="ignore"),
+            "latest": latest_row,
+        }
+
+    return {
+        "status": "price_update",
+        "matches": matches,
+        "same_type": same_scope.drop(columns=["_source_scope", "_parsed_date"], errors="ignore"),
+        "latest": latest_row,
+    }

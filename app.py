@@ -26,10 +26,12 @@ from data_loader import (
 )
 from pricing_engine import analyze_wine, normalize_comp_data
 from public_data import refresh_all_public_data
+from github_storage import commit_pending_comps, github_storage_status, GitHubStorageError
 from vision_intake import (
     extract_wine_from_images,
     build_comp_record,
     duplicate_matches,
+    classify_existing_observation,
     TIERS,
     PRICE_TYPES,
     CONFIDENCE_LEVELS,
@@ -63,7 +65,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.3</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -83,7 +85,7 @@ def _known_label(r):
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3 uses the expanded Paso workbook, public market context, and AI-assisted comp intake.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.3 uses the expanded Paso workbook, public market context, AI-assisted comp intake, and batched GitHub persistence.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -433,10 +435,22 @@ elif page == "Data Hub (Admin)":
             if extracted.get("club_price") is not None:
                 st.write(f"**Club/member price detected:** ${float(extracted['club_price']):,.2f} — shown for reference, not used as the main comp price.")
 
-        duplicates = duplicate_matches(all_data, proposed)
-        if duplicates is not None and not duplicates.empty:
-            st.warning(f"Possible duplicate: {len(duplicates)} existing observation(s) already match this winery + wine + vintage. Review them before adding another price observation.")
-            dup_view = duplicates[["winery", "wine", "vintage", "price", "price_type", "source_name", "price_date"]].copy()
+        preliminary_check = classify_existing_observation(all_data, proposed)
+        existing = preliminary_check.get("matches")
+        if existing is not None and not existing.empty:
+            status = preliminary_check.get("status")
+            if status == "exact_duplicate":
+                st.error("Exact duplicate detected: the same wine/vintage, price type/source and price already exist. Review before approving.")
+            elif status == "price_update":
+                latest = preliminary_check.get("latest") or {}
+                old_price = latest.get("price")
+                old_date = latest.get("price_date") or "unknown date"
+                st.info(f"Potential price update detected: latest matching {proposed.get('price_type')} observation is ${float(old_price):,.2f} from {old_date}; proposed price is ${float(proposed.get('price') or 0):,.2f}. The old observation will be preserved for history and the new one will become current for current-market analysis.")
+            elif status == "alternate_price_type":
+                st.info("Existing wine/vintage found, but this is a different price type. Both observations can be retained (for example, winery retail vs club price).")
+            elif status == "corroborating_source":
+                st.info("Existing wine/vintage and price type found from a different source. This can be retained as an independent market observation.")
+            dup_view = existing[["winery", "wine", "vintage", "price", "price_type", "source_name", "price_date"]].copy()
             st.dataframe(dup_view, use_container_width=True, hide_index=True)
 
         st.markdown("#### Review extracted comp")
@@ -528,11 +542,29 @@ elif page == "Data Hub (Admin)":
                     "price_date": rv_price_date.strip(),
                     "data_confidence": rv_conf,
                 }])
-                current = st.session_state.uploaded_comps
-                combined = pd.concat([current, approved_record], ignore_index=True) if current is not None else approved_record
-                st.session_state.uploaded_comps = normalize_comp_data(combined)
-                st.session_state.vision_extraction = None
-                st.success("Comparable approved and added to this session. Use Download merged comp database below to persist the updated file in GitHub.")
+                final_record = approved_record.iloc[0].to_dict()
+                final_check = classify_existing_observation(all_data, final_record)
+                final_status = final_check.get("status")
+                if final_status == "exact_duplicate":
+                    st.error("Not added: this is an exact duplicate of an existing observation. If the source or price has changed, edit those fields and approve again.")
+                else:
+                    current = st.session_state.uploaded_comps
+                    combined = pd.concat([current, approved_record], ignore_index=True) if current is not None else approved_record
+                    st.session_state.uploaded_comps = normalize_comp_data(combined)
+                    st.session_state.vision_extraction = None
+                    if final_status == "price_update":
+                        latest = final_check.get("latest") or {}
+                        previous = latest.get("price")
+                        st.success(f"Price update added to this session (${float(previous):,.2f} → ${rv_price:,.2f}). The prior price is preserved for history; current-market analysis will use the newest observation after you persist the merged database.")
+                    elif final_status == "alternate_price_type":
+                        st.success("Alternate price type added to this session. Existing price observations were preserved.")
+                    elif final_status == "corroborating_source":
+                        st.success("Independent source observation added to this session.")
+                    else:
+                        st.success("New comparable added to this session.")
+                    st.info("This observation is staged in the current session. Use **Commit pending changes to GitHub database** below when you are ready to save the batch permanently.")
+
+    st.warning("Approved/manual comps are staged in this Streamlit session until you commit the batch to GitHub. You can enter multiple wines first, then save them together in one database commit.")
 
     st.markdown("### Comp database")
     source_counts = all_data.groupby(["source_name", "data_confidence"], dropna=False).size().reset_index(name="Observations")
@@ -579,13 +611,58 @@ elif page == "Data Hub (Admin)":
                 "single_vineyard": False, "product_tier": m_tier, "source_name": "Manual Rudder research",
                 "source_url": m_source, "price_date": pd.Timestamp.today().date().isoformat(), "data_confidence": "Moderate",
             }])
-            current = st.session_state.uploaded_comps
-            st.session_state.uploaded_comps = normalize_comp_data(pd.concat([current, new], ignore_index=True) if current is not None else new)
-            st.success("Comparable added for this session. Download the merged database below if you want to persist it in GitHub.")
+            manual_check = classify_existing_observation(all_data, new.iloc[0].to_dict())
+            manual_status = manual_check.get("status")
+            if manual_status == "exact_duplicate":
+                st.error("Not added: an exact duplicate of this wine/vintage/price type/price already exists.")
+            else:
+                current = st.session_state.uploaded_comps
+                st.session_state.uploaded_comps = normalize_comp_data(pd.concat([current, new], ignore_index=True) if current is not None else new)
+                if manual_status == "price_update":
+                    latest = manual_check.get("latest") or {}
+                    st.success(f"Price update added for this session (${float(latest.get('price')):,.2f} → ${m_price:,.2f}); the older observation is retained for history.")
+                elif manual_status == "alternate_price_type":
+                    st.success("Alternate price type added for this session; existing observations were retained.")
+                else:
+                    st.success("Comparable added for this session.")
+                st.info("The observation is staged. Commit the pending batch to GitHub below when you are ready.")
 
-    merged_export = merge_data(seed, st.session_state.uploaded_comps)
-    st.download_button("Download merged comp database", merged_export.to_csv(index=False).encode("utf-8"),
-                       file_name="wine_comps_updated.csv", mime="text/csv")
+    st.markdown("### Persist staged comp changes")
+    pending = st.session_state.uploaded_comps
+    pending_count = 0 if pending is None else len(pending)
+    configured, gh_status = github_storage_status()
+
+    p1, p2, p3 = st.columns([1, 1, 2])
+    p1.metric("Pending observations", pending_count)
+    p2.metric("Permanent database", "GitHub" if configured else "Not configured")
+    with p3:
+        st.caption(gh_status)
+
+    if pending_count == 0:
+        st.info("No staged comp changes are waiting to be saved.")
+    elif not configured:
+        st.warning("GitHub write-back is not configured yet. Add GITHUB_TOKEN and GITHUB_REPO to Streamlit Secrets before committing staged observations.")
+    else:
+        st.caption("This saves all staged observations in one commit. The app fetches the newest GitHub database immediately before merging, so recently committed rows are preserved.")
+        if st.button(f"Commit {pending_count} pending change{'s' if pending_count != 1 else ''} to GitHub database", type="primary", use_container_width=True):
+            with st.spinner("Fetching the current comp database and committing the staged batch..."):
+                try:
+                    save_result = commit_pending_comps(pending)
+                except GitHubStorageError as exc:
+                    st.error(f"GitHub save failed: {exc}")
+                except Exception as exc:
+                    st.error(f"Unexpected GitHub save error: {exc}")
+                else:
+                    st.session_state.uploaded_comps = None
+                    st.session_state.vision_extraction = None
+                    st.success(
+                        f"Saved {save_result['staged_count']} staged observation(s) to "
+                        f"{save_result['repo']} on `{save_result['branch']}`. "
+                        f"Database rows: {save_result['remote_before']} → {save_result['remote_after']}."
+                    )
+                    if save_result.get("commit_url"):
+                        st.link_button("Open GitHub commit", save_result["commit_url"])
+                    st.info("GitHub will trigger the Streamlit redeploy. Wait for the app to reload before starting another batch so the newly committed database is loaded locally.")
 
     st.divider()
     st.markdown("### Public market context")

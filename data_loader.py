@@ -111,5 +111,12 @@ def load_rudder_pricing_workbook(uploaded_file) -> pd.DataFrame:
 def merge_data(seed: pd.DataFrame, added: pd.DataFrame | None) -> pd.DataFrame:
     if added is None or added.empty:
         return seed.copy()
-    combined = pd.concat([seed, added], ignore_index=True)
-    return combined.drop_duplicates(["winery", "wine", "vintage", "price", "price_type"], keep="last")
+    combined = normalize_comp_data(pd.concat([seed, added], ignore_index=True))
+    # Keep independent sources and dated price-history observations, while collapsing
+    # rows that are truly repeated.
+    identity = [
+        "winery", "wine", "vintage", "price", "price_type",
+        "source_name", "source_url", "price_date",
+    ]
+    available = [c for c in identity if c in combined.columns]
+    return combined.drop_duplicates(available, keep="last").reset_index(drop=True)

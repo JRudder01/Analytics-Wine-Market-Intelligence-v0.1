@@ -1,4 +1,4 @@
-# Rudder Analytics — Wine Market Intelligence v0.3.1
+# Rudder Analytics — Wine Market Intelligence v0.3.2
 
 v0.3 adds **AI Screenshot Intake** to the v0.2 comparable-market/public-data architecture. A Rudder administrator can upload 1–4 screenshots of one wine product/shop page, have OpenAI vision extract only visibly supported facts, review/edit the proposed comp row, and add the approved observation to the current Data Hub session.
 
@@ -139,3 +139,46 @@ A later Supabase/PostgreSQL phase can turn approval into a permanent database in
 - Up to four screenshots can be combined across file uploads and clipboard pastes.
 - Clipboard screenshots can be previewed and cleared before extraction.
 - Estate classification is stricter: component vineyard/source wording such as "from Eberle Estate" no longer marks the finished wine Estate. Estate now requires the wine name itself or clear whole-wine estate-grown/estate-bottled evidence.
+
+
+## v0.3.2 additions
+
+- Screenshot and manual intake now classifies existing records as **new**, **exact duplicate**, **price update**, **alternate price type**, or **corroborating source**.
+- Exact duplicates are blocked from being added again.
+- Price updates preserve the older observation for historical analysis and add the newer price as a new dated observation.
+- Current-market pricing now uses only the **latest observation** for each wine/vintage/price-type/source identity, preventing old and new prices from both influencing the same current-market comp analysis.
+- Alternate price types (for example Winery retail vs Wine club/member price) remain separate observations.
+- The Data Hub now displays an explicit persistence reminder: session approvals are **not** written to GitHub automatically. Download the merged database and replace `data/wine_comps.csv` to persist changes.
+
+### Persistence workflow
+
+```text
+Approve/add comparable
+        ↓
+Current Streamlit session only
+        ↓
+Download merged comp database
+        ↓
+Downloaded file is already named wine_comps.csv
+        ↓
+Replace data/wine_comps.csv in GitHub
+        ↓
+Streamlit redeploys with the persisted database
+```
+
+Automatic GitHub writes are intentionally not enabled in v0.3.2 because that would require repository-write credentials in the app. A later Supabase/PostgreSQL data layer is the preferred path for direct permanent inserts.
+
+## v0.3.3 — batched GitHub database persistence
+
+Approved screenshot/manual comp records are staged in the current Streamlit session. The Data Hub now provides a **Commit pending changes to GitHub database** button that saves the whole batch to `data/wine_comps.csv` in one GitHub commit.
+
+Add these Streamlit Secrets (never commit the real token to GitHub):
+
+```toml
+GITHUB_TOKEN = "github_pat_..."
+GITHUB_REPO = "JRudder01/Analytics-Wine-Market-Intelligence-v0.1"
+GITHUB_BRANCH = "main"
+GITHUB_COMPS_PATH = "data/wine_comps.csv"
+```
+
+Use a fine-grained GitHub personal access token limited to this repository with **Contents: Read and write**. The save process fetches the current file and SHA immediately before each commit and retries once if the file changed concurrently.

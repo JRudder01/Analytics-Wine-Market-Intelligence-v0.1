@@ -118,6 +118,41 @@ def normalize_comp_data(df: pd.DataFrame) -> pd.DataFrame:
     return out[expected]
 
 
+
+
+def _observation_source_scope(row: pd.Series) -> str:
+    price_type = _clean_text(row.get("price_type")).casefold()
+    winery_direct = {"winery msrp", "winery retail", "wine club/member price", "historical listed price"}
+    if price_type in winery_direct:
+        return f"winery::{_clean_text(row.get('winery')).casefold()}"
+    url = _clean_text(row.get("source_url")).casefold()
+    if url:
+        import re
+        m = re.match(r"https?://([^/]+)", url)
+        if m:
+            return f"site::{m.group(1).removeprefix('www.')}"
+    return f"source::{_clean_text(row.get('source_name')).casefold()}"
+
+
+def latest_current_observations(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep the newest price observation per wine/vintage/type/source identity.
+
+    Historical rows remain stored in wine_comps.csv, but current-market pricing should
+    not count a winery's old and new price for the same vintage as separate comps.
+    Third-party retail sources retain one latest observation per merchant/source.
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+    out = df.copy()
+    out["_source_scope"] = out.apply(_observation_source_scope, axis=1)
+    out["_parsed_price_date"] = pd.to_datetime(out.get("price_date", ""), errors="coerce")
+    out["_row_order"] = np.arange(len(out))
+    key = ["winery", "wine", "vintage", "price_type", "_source_scope"]
+    out = out.sort_values(["_parsed_price_date", "_row_order"], ascending=[True, True], na_position="first")
+    out = out.drop_duplicates(key, keep="last")
+    return out.drop(columns=["_source_scope", "_parsed_price_date", "_row_order"], errors="ignore")
+
+
 def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.DataFrame:
     comps = normalize_comp_data(df)
     winery = _clean_text(target.get("winery"))
@@ -131,6 +166,11 @@ def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.Data
     critic = target.get("critic_score")
     critic = float(critic) if critic not in (None, "") and not pd.isna(critic) else np.nan
     analysis_mode = _clean_text(target.get("analysis_mode") or "Current market")
+
+    # Current-market analysis uses only the latest observation for each comp/source
+    # identity, while the underlying database retains older prices for history.
+    if analysis_mode.casefold().startswith("current"):
+        comps = latest_current_observations(comps)
 
     exact_target = (
         comps["winery"].str.casefold().eq(winery.casefold()) &
