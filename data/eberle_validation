@@ -1,0 +1,4 @@
+Winery	Wine	Vintage	Known Price	Volume	Market-Aligned	Premium	Known Price Within Scenario Range	Confidence	Comparable Count
+Eberle	Vineyard Selection Cabernet Sauvignon	2023	30	31	36	45	FALSE	Moderate	16
+Eberle	Estate Cabernet Sauvignon	2023	60	47	60	70	TRUE	Moderate	16
+Eberle	Reserve Cabernet Sauvignon	2021	125	85	105	120	FALSE	Moderate	16
