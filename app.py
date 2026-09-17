@@ -65,7 +65,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.3</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.4</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -83,9 +83,23 @@ def _known_label(r):
     return f"{r['winery']} — {vint} {r['wine']}"
 
 
+def _reset_vision_intake():
+    """Reset screenshot/vision widgets by rotating their Streamlit keys."""
+    st.session_state["vision_intake_nonce"] = int(st.session_state.get("vision_intake_nonce", 0)) + 1
+    for key in [
+        "vision_pasted_images",
+        "vision_last_paste_hash",
+        "vision_extraction",
+        "vision_extraction_source_url",
+        "vision_extraction_source_kind",
+        "vision_extraction_source_name",
+    ]:
+        st.session_state.pop(key, None)
+
+
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.3 uses the expanded Paso workbook, public market context, AI-assisted comp intake, and batched GitHub persistence.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.4 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, and reset-safe screenshot intake.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -300,6 +314,17 @@ elif page == "Data Hub (Admin)":
     st.markdown("### Screenshot Intake")
     st.caption("Upload screenshots you manually captured from a wine product/shop page. AI extracts visible facts, then Rudder applies our classification rules. Nothing is saved until you review and approve it.")
 
+    if "vision_intake_nonce" not in st.session_state:
+        st.session_state.vision_intake_nonce = 0
+    vision_nonce = int(st.session_state.vision_intake_nonce)
+
+    flash_success = st.session_state.pop("vision_flash_success", None)
+    flash_info = st.session_state.pop("vision_flash_info", None)
+    if flash_success:
+        st.success(flash_success)
+    if flash_info:
+        st.info(flash_info)
+
     if "vision_pasted_images" not in st.session_state:
         st.session_state.vision_pasted_images = []
     if "vision_last_paste_hash" not in st.session_state:
@@ -311,7 +336,7 @@ elif page == "Data Hub (Admin)":
             "Wine product screenshots (1–4)",
             type=["png", "jpg", "jpeg", "webp"],
             accept_multiple_files=True,
-            key="vision_shots",
+            key=f"vision_shots_{vision_nonce}",
             help="Use screenshots from one wine/product page at a time. Include price/spec sections when possible.",
         )
 
@@ -322,7 +347,7 @@ elif page == "Data Hub (Admin)":
                 text_color="#ffffff",
                 background_color="#285873",
                 hover_background_color="#1f465d",
-                key="vision_clipboard_paste",
+                key=f"vision_clipboard_paste_{vision_nonce}",
                 errors="raise",
             )
             if pasted.image_data is not None:
@@ -350,14 +375,10 @@ elif page == "Data Hub (Admin)":
                 for idx, item in enumerate(st.session_state.vision_pasted_images):
                     with preview_cols[idx % len(preview_cols)]:
                         st.image(item["bytes"], caption=item["name"], use_container_width=True)
-                if st.button("Clear clipboard screenshots", key="clear_vision_clipboard"):
-                    st.session_state.vision_pasted_images = []
-                    st.session_state.vision_last_paste_hash = ""
-                    st.rerun()
 
         vision_source_url = st.text_input(
             "Source URL",
-            key="vision_source_url",
+            key=f"vision_source_url_{vision_nonce}",
             placeholder="https://winery.example/product/...",
             help="Stored for auditability; Rudder does not fetch this URL during screenshot extraction.",
         )
@@ -365,11 +386,11 @@ elif page == "Data Hub (Admin)":
         vision_source_kind = st.selectbox(
             "Source type",
             ["Official winery site", "Retailer / merchant", "Other public source"],
-            key="vision_source_kind",
+            key=f"vision_source_kind_{vision_nonce}",
         )
         vision_source_name = st.text_input(
             "Source name override (optional)",
-            key="vision_source_name",
+            key=f"vision_source_name_{vision_nonce}",
             placeholder="Eberle Winery",
         )
         model_options = ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"]
@@ -384,6 +405,11 @@ elif page == "Data Hub (Admin)":
         )
 
     combined_shots = list(shot_files or []) + [item["bytes"] for item in st.session_state.vision_pasted_images]
+    if combined_shots or st.session_state.get("vision_extraction"):
+        if st.button("Clear screenshots & reset intake", key=f"clear_vision_all_{vision_nonce}"):
+            _reset_vision_intake()
+            st.rerun()
+
     too_many_shots = len(combined_shots) > 4
     if combined_shots:
         st.caption(f"{len(combined_shots)} screenshot(s) ready. Screenshot content is sent to the configured OpenAI API model only when you click Extract.")
@@ -394,7 +420,7 @@ elif page == "Data Hub (Admin)":
         "Extract wine details with AI",
         type="primary",
         disabled=(not combined_shots) or too_many_shots,
-        key="vision_extract_btn",
+        key=f"vision_extract_btn_{vision_nonce}",
     )
     if extract_clicked:
         try:
@@ -466,47 +492,47 @@ elif page == "Data Hub (Admin)":
             category_options.append(graph_default)
             category_options = sorted(set(category_options))
 
-        with st.form("vision_review_form"):
+        with st.form(f"vision_review_form_{vision_nonce}"):
             r1, r2, r3, r4 = st.columns(4)
-            rv_winery = r1.text_input("Winery / producer", value=proposed.get("winery", ""), key="rv_winery")
-            rv_wine = r2.text_input("Wine / label", value=proposed.get("wine", ""), key="rv_wine")
+            rv_winery = r1.text_input("Winery / producer", value=proposed.get("winery", ""), key=f"rv_winery_{vision_nonce}")
+            rv_wine = r2.text_input("Wine / label", value=proposed.get("wine", ""), key=f"rv_wine_{vision_nonce}")
             rv_vintage = r3.number_input("Vintage", min_value=1900, max_value=2100,
-                                         value=int(proposed.get("vintage") or pd.Timestamp.today().year), step=1, key="rv_vintage")
-            rv_price = r4.number_input("Price", min_value=0.0, value=float(proposed.get("price") or 0.0), step=1.0, format="%.2f", key="rv_price")
+                                         value=int(proposed.get("vintage") or pd.Timestamp.today().year), step=1, key=f"rv_vintage_{vision_nonce}")
+            rv_price = r4.number_input("Price", min_value=0.0, value=float(proposed.get("price") or 0.0), step=1.0, format="%.2f", key=f"rv_price_{vision_nonce}")
 
             r1, r2, r3, r4 = st.columns(4)
-            rv_varietal = r1.text_input("Varietal / blend", value=proposed.get("varietal", ""), key="rv_varietal")
+            rv_varietal = r1.text_input("Varietal / blend", value=proposed.get("varietal", ""), key=f"rv_varietal_{vision_nonce}")
             rv_graph = r2.selectbox("Market category", category_options,
-                                    index=category_options.index(graph_default), key="rv_graph")
+                                    index=category_options.index(graph_default), key=f"rv_graph_{vision_nonce}")
             general_options = ["Red", "White", "Rosé", "Sparkling", "Dessert/Other"]
             gen_default = proposed.get("general_category") if proposed.get("general_category") in general_options else "Red"
-            rv_general = r3.selectbox("General category", general_options, index=general_options.index(gen_default), key="rv_general")
+            rv_general = r3.selectbox("General category", general_options, index=general_options.index(gen_default), key=f"rv_general_{vision_nonce}")
             rv_tier_default = proposed.get("product_tier") if proposed.get("product_tier") in TIERS else "Core"
-            rv_tier = r4.selectbox("Product tier", TIERS, index=TIERS.index(rv_tier_default), key="rv_tier")
+            rv_tier = r4.selectbox("Product tier", TIERS, index=TIERS.index(rv_tier_default), key=f"rv_tier_{vision_nonce}")
 
             r1, r2, r3, r4 = st.columns(4)
-            rv_region = r1.text_input("Region / AVA", value=proposed.get("region", ""), key="rv_region")
-            rv_subregion = r2.text_input("Sub-AVA / district", value=proposed.get("subregion", ""), key="rv_subregion")
+            rv_region = r1.text_input("Region / AVA", value=proposed.get("region", ""), key=f"rv_region_{vision_nonce}")
+            rv_subregion = r2.text_input("Sub-AVA / district", value=proposed.get("subregion", ""), key=f"rv_subregion_{vision_nonce}")
             price_type_default = proposed.get("price_type") if proposed.get("price_type") in PRICE_TYPES else "Observed retail"
-            rv_price_type = r3.selectbox("Price type", PRICE_TYPES, index=PRICE_TYPES.index(price_type_default), key="rv_price_type")
+            rv_price_type = r3.selectbox("Price type", PRICE_TYPES, index=PRICE_TYPES.index(price_type_default), key=f"rv_price_type_{vision_nonce}")
             conf_default = proposed.get("data_confidence") if proposed.get("data_confidence") in CONFIDENCE_LEVELS else "Moderate"
-            rv_conf = r4.selectbox("Data confidence", CONFIDENCE_LEVELS, index=CONFIDENCE_LEVELS.index(conf_default), key="rv_conf")
+            rv_conf = r4.selectbox("Data confidence", CONFIDENCE_LEVELS, index=CONFIDENCE_LEVELS.index(conf_default), key=f"rv_conf_{vision_nonce}")
 
             r1, r2, r3, r4 = st.columns(4)
-            rv_critic = r1.text_input("Critic (optional)", value=proposed.get("critic", ""), key="rv_critic")
+            rv_critic = r1.text_input("Critic (optional)", value=proposed.get("critic", ""), key=f"rv_critic_{vision_nonce}")
             rv_score = r2.number_input("Critic score (optional)", min_value=0.0, max_value=100.0,
-                                       value=float(proposed.get("critic_score") or 0.0), step=1.0, key="rv_score")
+                                       value=float(proposed.get("critic_score") or 0.0), step=1.0, key=f"rv_score_{vision_nonce}")
             rv_cases = r3.number_input("Cases produced (optional)", min_value=0,
-                                       value=int(proposed.get("cases_produced") or 0), step=50, key="rv_cases")
+                                       value=int(proposed.get("cases_produced") or 0), step=50, key=f"rv_cases_{vision_nonce}")
             rv_abv = r4.number_input("Alcohol % (optional)", min_value=0.0, max_value=30.0,
-                                     value=float(proposed.get("alcohol_pct") or 0.0), step=0.1, format="%.1f", key="rv_abv")
+                                     value=float(proposed.get("alcohol_pct") or 0.0), step=0.1, format="%.1f", key=f"rv_abv_{vision_nonce}")
 
             r1, r2, r3, r4 = st.columns(4)
-            rv_estate = r1.checkbox("Estate", value=bool(proposed.get("estate", False)), key="rv_estate")
-            rv_single = r2.checkbox("Single vineyard", value=bool(proposed.get("single_vineyard", False)), key="rv_single")
-            rv_source_name = r3.text_input("Source name", value=proposed.get("source_name", ""), key="rv_source_name")
-            rv_price_date = r4.text_input("Price observed date", value=proposed.get("price_date", pd.Timestamp.today().date().isoformat()), key="rv_price_date")
-            rv_source_url = st.text_input("Source URL", value=proposed.get("source_url", ""), key="rv_source_url")
+            rv_estate = r1.checkbox("Estate", value=bool(proposed.get("estate", False)), key=f"rv_estate_{vision_nonce}")
+            rv_single = r2.checkbox("Single vineyard", value=bool(proposed.get("single_vineyard", False)), key=f"rv_single_{vision_nonce}")
+            rv_source_name = r3.text_input("Source name", value=proposed.get("source_name", ""), key=f"rv_source_name_{vision_nonce}")
+            rv_price_date = r4.text_input("Price observed date", value=proposed.get("price_date", pd.Timestamp.today().date().isoformat()), key=f"rv_price_date_{vision_nonce}")
+            rv_source_url = st.text_input("Source URL", value=proposed.get("source_url", ""), key=f"rv_source_url_{vision_nonce}")
 
             approved = st.form_submit_button("Approve & add comparable to this session", type="primary")
 
@@ -551,18 +577,20 @@ elif page == "Data Hub (Admin)":
                     current = st.session_state.uploaded_comps
                     combined = pd.concat([current, approved_record], ignore_index=True) if current is not None else approved_record
                     st.session_state.uploaded_comps = normalize_comp_data(combined)
-                    st.session_state.vision_extraction = None
                     if final_status == "price_update":
                         latest = final_check.get("latest") or {}
                         previous = latest.get("price")
-                        st.success(f"Price update added to this session (${float(previous):,.2f} → ${rv_price:,.2f}). The prior price is preserved for history; current-market analysis will use the newest observation after you persist the merged database.")
+                        success_message = f"Price update added to this session (${float(previous):,.2f} → ${rv_price:,.2f}). The prior price is preserved for history; current-market analysis will use the newest observation after you persist the merged database."
                     elif final_status == "alternate_price_type":
-                        st.success("Alternate price type added to this session. Existing price observations were preserved.")
+                        success_message = "Alternate price type added to this session. Existing price observations were preserved."
                     elif final_status == "corroborating_source":
-                        st.success("Independent source observation added to this session.")
+                        success_message = "Independent source observation added to this session."
                     else:
-                        st.success("New comparable added to this session.")
-                    st.info("This observation is staged in the current session. Use **Commit pending changes to GitHub database** below when you are ready to save the batch permanently.")
+                        success_message = "New comparable added to this session."
+                    st.session_state["vision_flash_success"] = success_message
+                    st.session_state["vision_flash_info"] = "Screenshot intake cleared automatically. This observation is staged in the current session; use **Commit pending changes to GitHub database** when you are ready to save the batch permanently."
+                    _reset_vision_intake()
+                    st.rerun()
 
     st.warning("Approved/manual comps are staged in this Streamlit session until you commit the batch to GitHub. You can enter multiple wines first, then save them together in one database commit.")
 
