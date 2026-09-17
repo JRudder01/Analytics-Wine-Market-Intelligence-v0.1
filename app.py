@@ -24,7 +24,7 @@ from data_loader import (
     VISITOR_PATH,
     FEES_PATH,
 )
-from pricing_engine import analyze_wine, normalize_comp_data
+from pricing_engine import analyze_wine, normalize_comp_data, canonical_text_key
 from public_data import refresh_all_public_data
 from github_storage import commit_pending_comps, github_storage_status, GitHubStorageError
 from vision_intake import (
@@ -65,7 +65,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.9</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.10</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -99,7 +99,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.9 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category mapping, normalized comp identities, accent-insensitive matching, and reset-safe screenshot intake.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.10 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category mapping, normalized comp identities, accent-insensitive known-wine search, and reset-safe screenshot intake.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -110,10 +110,39 @@ if page == "Pricing Analysis":
         mask = known_df["label"].str.contains("Eberle — 2023 Vineyard Selection Cabernet", case=False, na=False)
         if mask.any():
             default_idx = int(np.flatnonzero(mask.to_numpy())[0])
-        selection = st.selectbox("Known wine", known_df["label"].tolist(), index=default_idx)
-        row = known_df.loc[known_df["label"].eq(selection)].iloc[0]
-        defaults = row.to_dict()
-        st.info("The selected wine's own price is excluded from its comparable analysis. Use Historical backtest mode to also exclude later vintages.")
+        known_search = st.text_input(
+            "Search known wines",
+            value="",
+            placeholder="Type winery or wine — accents, capitalization, spaces, and hyphens are optional",
+            help="Search is normalized, so 'Cotes du Robles Blanc' matches 'Côtes-du-Rôbles Blanc'.",
+        )
+
+        display_df = known_df
+        if known_search.strip():
+            query_key = canonical_text_key(known_search)
+            query_tokens = query_key.split()
+            search_keys = known_df.apply(
+                lambda r: canonical_text_key(
+                    f"{r.get('winery', '')} {r.get('vintage', '')} {r.get('wine', '')}"
+                ),
+                axis=1,
+            )
+            match_mask = search_keys.apply(lambda k: all(tok in k for tok in query_tokens))
+            display_df = known_df.loc[match_mask].copy()
+
+        if display_df.empty:
+            st.warning("No known wines match that search. Try fewer words or switch off 'Start from a known wine' to enter it manually.")
+        else:
+            labels = display_df["label"].tolist()
+            if known_search.strip():
+                select_idx = 0
+            else:
+                default_label = known_df.iloc[default_idx]["label"]
+                select_idx = labels.index(default_label) if default_label in labels else 0
+            selection = st.selectbox("Known wine", labels, index=select_idx)
+            row = display_df.loc[display_df["label"].eq(selection)].iloc[0]
+            defaults = row.to_dict()
+            st.info("The selected wine's own price is excluded from its comparable analysis. Use Historical backtest mode to also exclude later vintages.")
 
     c1, c2, c3, c4 = st.columns(4)
     winery = c1.text_input("Winery / producer", value=str(defaults.get("winery", "")))
