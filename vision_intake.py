@@ -11,6 +11,11 @@ from typing import Any
 from PIL import Image
 import pandas as pd
 
+from pricing_engine import (
+    canonical_text_key, canonical_producer_key, canonical_wine_key,
+    canonicalize_producer_display, reconcile_graph_category,
+)
+
 TIERS = ["Value/Core", "Core", "Estate", "Limited", "Reserve", "Flagship"]
 PRICE_TYPES = [
     "Winery MSRP",
@@ -210,34 +215,8 @@ def _text(value: Any) -> str:
 
 
 def normalize_direct_winery_name(value: Any) -> str:
-    """Return a stable source/producer label for direct winery records.
-
-    The goal is provenance consistency, not aggressive brand rewriting.  We only
-    remove common generic winery suffixes when they appear at the END of the
-    visible producer name.  Examples: ``Eberle Winery`` -> ``Eberle`` and
-    ``JUSTIN Vineyards & Winery`` -> ``JUSTIN``.
-    """
-    name = re.sub(r"\s+", " ", _text(value)).strip()
-    if not name:
-        return ""
-
-    # Remove trailing corporate/legal punctuation first.
-    name = re.sub(r"[,\s]+(?:LLC|Inc\.?|Incorporated|Ltd\.?|Limited)$", "", name, flags=re.I).strip()
-
-    # Generic producer descriptors are safe to remove only as trailing suffixes.
-    suffix_patterns = [
-        r"\s+Vineyards?\s*(?:&|and)\s*Winery$",
-        r"\s+Winery\s*(?:&|and)\s*Vineyards?$",
-        r"\s+Vineyards?\s*(?:&|and)\s*Cellars?$",
-        r"\s+Winery$",
-        r"\s+Wine\s+Company$",
-    ]
-    for pattern in suffix_patterns:
-        cleaned = re.sub(pattern, "", name, flags=re.I).strip()
-        if cleaned != name and cleaned:
-            name = cleaned
-            break
-    return name
+    """Stable display label for direct winery records, matched case-insensitively."""
+    return canonicalize_producer_display(value)
 
 
 def infer_graph_category(varietal_text: str, wine_name: str = "") -> str:
@@ -429,6 +408,7 @@ def build_comp_record(
     varietal = _text(extraction.get("varietal_text"))
     graph = infer_graph_category(varietal, wine)
     general = infer_general_category(graph, varietal, wine)
+    graph = reconcile_graph_category(graph, general, varietal, wine)
     price_type = infer_price_type(extraction, source_kind)
 
     if source_name_override.strip():
@@ -478,13 +458,14 @@ def duplicate_matches(all_data, record: dict[str, Any]):
     """Return same winery + label + vintage rows for reviewer display."""
     if all_data is None or all_data.empty:
         return all_data.iloc[0:0] if all_data is not None else None
-    winery = _text(record.get("winery")).casefold()
-    wine = _text(record.get("wine")).casefold()
+    winery = _text(record.get("winery"))
+    wine = _text(record.get("wine"))
+    producer_key = canonical_producer_key(winery)
+    wine_key = canonical_wine_key(winery, wine)
     vintage = record.get("vintage")
-    mask = (
-        all_data["winery"].fillna("").astype(str).str.strip().str.casefold().eq(winery)
-        & all_data["wine"].fillna("").astype(str).str.strip().str.casefold().eq(wine)
-    )
+    producer_keys = all_data["winery"].fillna("").astype(str).map(canonical_producer_key)
+    wine_keys = all_data.apply(lambda r: canonical_wine_key(r.get("winery"), r.get("wine")), axis=1)
+    mask = producer_keys.eq(producer_key) & wine_keys.eq(wine_key)
     if vintage is not None:
         numeric_vintage = all_data["vintage"]
         mask &= numeric_vintage.eq(float(vintage))
@@ -492,7 +473,7 @@ def duplicate_matches(all_data, record: dict[str, Any]):
 
 
 def _norm_source(value: Any) -> str:
-    return re.sub(r"\s+", " ", _text(value).casefold()).strip()
+    return canonical_text_key(value)
 
 
 def _source_scope(record: dict[str, Any]) -> str:

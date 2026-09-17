@@ -6,7 +6,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from pricing_engine import normalize_comp_data
+from pricing_engine import normalize_comp_data, dedupe_storage_observations
 
 ROOT = Path(__file__).resolve().parent
 COMP_PATH = ROOT / "data" / "wine_comps.csv"
@@ -112,11 +112,4 @@ def merge_data(seed: pd.DataFrame, added: pd.DataFrame | None) -> pd.DataFrame:
     if added is None or added.empty:
         return seed.copy()
     combined = normalize_comp_data(pd.concat([seed, added], ignore_index=True))
-    # Keep independent sources and dated price-history observations, while collapsing
-    # rows that are truly repeated.
-    identity = [
-        "winery", "wine", "vintage", "price", "price_type",
-        "source_name", "source_url", "price_date",
-    ]
-    available = [c for c in identity if c in combined.columns]
-    return combined.drop_duplicates(available, keep="last").reset_index(drop=True)
+    return dedupe_storage_observations(combined)

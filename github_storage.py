@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 import requests
 
-from pricing_engine import normalize_comp_data
+from pricing_engine import normalize_comp_data, dedupe_storage_observations
 
 GITHUB_API = "https://api.github.com"
 DEFAULT_BRANCH = "main"
@@ -102,18 +102,7 @@ def merge_remote_and_pending(remote: pd.DataFrame, pending: pd.DataFrame | None)
     if pending is None or pending.empty:
         return normalize_comp_data(remote.copy())
     combined = pd.concat([remote, normalize_comp_data(pending)], ignore_index=True)
-    combined = normalize_comp_data(combined)
-
-    # Preserve independent sources and historical price changes. Exact repeated rows
-    # are collapsed, including rows staged twice in one session.
-    identity = [
-        "winery", "wine", "vintage", "price", "price_type",
-        "source_name", "source_url", "price_date",
-    ]
-    available = [c for c in identity if c in combined.columns]
-    if available:
-        combined = combined.drop_duplicates(available, keep="last")
-    return combined.reset_index(drop=True)
+    return dedupe_storage_observations(combined)
 
 
 def _put_file(cfg: GitHubConfig, csv_bytes: bytes, sha: str, message: str) -> dict[str, Any]:

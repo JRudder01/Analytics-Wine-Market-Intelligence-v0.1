@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 import math
+import re
+import unicodedata
 import numpy as np
 import pandas as pd
 
@@ -35,6 +37,211 @@ def _bool(v) -> bool:
         return v
     return str(v).strip().lower() in {"1", "true", "yes", "y", "estate", "single vineyard"}
 
+
+# Canonical identity helpers are deliberately separate from display text.
+# This lets a user type names without accents/punctuation (for example
+# ``Cotes-du-Robles Blanc``) while preserving the winery's preferred spelling
+# in the stored/displayed record.
+PRODUCER_DISPLAY_ALIASES = {
+    "eberle": "Eberle",
+    "eberle winery": "Eberle",
+    "justin": "Justin",
+    "justin winery": "Justin",
+    "justin vineyards and winery": "Justin",
+    "detente": "Détente",
+    "austin hope": "Austin Hope",
+    "vina robles": "Vina Robles",
+    "peachy canyon": "Peachy Canyon",
+}
+
+
+def canonical_text_key(value) -> str:
+    """Accent-, punctuation-, and case-insensitive key for matching only."""
+    text = _clean_text(value)
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.casefold().replace("&", " and ")
+    text = re.sub(r"[\u2010-\u2015_\-/]+", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def canonical_producer_key(value) -> str:
+    key = canonical_text_key(value)
+    # Strip common generic suffixes only from the end of a producer name.
+    key = re.sub(r"\s+(vineyards? and winery|winery and vineyards?|wine company|winery)$", "", key).strip()
+    return key
+
+
+def canonicalize_producer_display(value) -> str:
+    text = _clean_text(value)
+    key = canonical_producer_key(text)
+    return PRODUCER_DISPLAY_ALIASES.get(key, text)
+
+
+def canonical_wine_key(winery, wine) -> str:
+    producer = canonical_producer_key(winery)
+    key = canonical_text_key(wine)
+    # Conservative, producer-specific aliases only.  We do not strip meaningful
+    # tier words such as Reserve/Estate/Single Vineyard.
+    aliases = {
+        ("eberle", "vineyard selection cabernet"): "vineyard selection cabernet sauvignon",
+        ("eberle", "full boar white"): "full boar white blend",
+        ("detente", "margot"): "margot pinot noir",
+    }
+    return aliases.get((producer, key), key)
+
+
+def canonical_price_type_key(value) -> str:
+    key = canonical_text_key(value)
+    aliases = {
+        "winery retail workbook": "winery retail",
+        "retail winery": "winery retail",
+        "winery msrp": "winery msrp",
+        "wine club member price": "wine club member price",
+    }
+    return aliases.get(key, key)
+
+
+def _parse_varietal_components(varietal_text: str):
+    """Return [(pct_or_None, grape_text)] from a varietal/blend description."""
+    text = _clean_text(varietal_text)
+    if not text:
+        return []
+    parts = [p.strip() for p in re.split(r"[,;/]", text) if p.strip()]
+    out = []
+    for part in parts:
+        m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*%\s*(.+?)\s*$", part)
+        if m:
+            out.append((float(m.group(1)), m.group(2).strip()))
+        else:
+            cleaned = re.sub(r"^\s*100\s*%\s*", "", part).strip()
+            out.append((None, cleaned))
+    return out
+
+
+def reconcile_graph_category(graph_category: str, general_category: str, varietal_text: str, wine_name: str = "") -> str:
+    """Repair only high-confidence category mistakes; preserve curated blend labels."""
+    graph = _clean_text(graph_category)
+    general = _clean_text(general_category)
+    graph_key = canonical_text_key(graph)
+    style_key = canonical_text_key(f"{wine_name} {general} {graph}")
+
+    # Rosé is a market style and should not be treated as a red Grenache/Pinot/etc. comp.
+    if "rose" in style_key or canonical_text_key(general) == "rose":
+        return "Rosé"
+    if graph_key in {"white blen", "whiteblend"}:
+        return "White Blend"
+
+    comps = _parse_varietal_components(varietal_text)
+    named = [(pct, canonical_text_key(grape), grape) for pct, grape in comps if canonical_text_key(grape)]
+    if len(named) < 2:
+        return graph
+
+    # Respect existing curated blend labels unless the blend is clearly incompatible.
+    known_blends = {"bordeaux blend", "rhone blend", "white blend", "red blend", "zinfandel blend"}
+    if graph_key in known_blends:
+        if graph_key == "rhone blend":
+            rhone_red = {"grenache", "syrah", "mourvedre", "counoise", "cinsault", "carignan", "petite sirah"}
+            keys = {key for _, key, _ in named}
+            non_rhone = keys - rhone_red
+            # Only override when several clearly non-Rhône grapes make the label untenable.
+            if canonical_text_key(general) == "red" and len(non_rhone) >= 2 and len(non_rhone) >= len(keys & rhone_red):
+                return "Red Blend"
+        return graph
+
+    # For a nominal single-varietal category, percentage data can prove it is really a blend.
+    pct_rows = [(pct, key, raw) for pct, key, raw in named if pct is not None]
+    if pct_rows:
+        top_pct, top_key, top_raw = max(pct_rows, key=lambda x: x[0])
+        if top_pct >= 75:
+            known = {
+                "cabernet sauvignon": "Cabernet Sauvignon", "cabernet franc": "Cabernet Franc",
+                "pinot noir": "Pinot Noir", "zinfandel": "Zinfandel", "syrah": "Syrah",
+                "barbera": "Barbera", "sangiovese": "Sangiovese", "grenache": "Grenache",
+                "chardonnay": "Chardonnay", "viognier": "Viognier", "sauvignon blanc": "Sauvignon Blanc",
+            }
+            return known.get(top_key, graph)
+
+    keys = {key for _, key, _ in named}
+    bordeaux = {"cabernet sauvignon", "cabernet franc", "merlot", "malbec", "petit verdot"}
+    rhone_red = {"grenache", "syrah", "mourvedre", "counoise", "cinsault", "carignan"}
+    if keys and keys.issubset(bordeaux):
+        return "Bordeaux Blend"
+    if keys and keys.issubset(rhone_red):
+        return "Rhône Blend"
+    if canonical_text_key(general) == "white":
+        return "White Blend"
+    if canonical_text_key(general) == "red":
+        return "Red Blend"
+    return graph
+
+def _equivalent_observation_key(row: pd.Series) -> tuple:
+    """Identity used to stop the same comp from receiving duplicate model weight."""
+    return (
+        canonical_producer_key(row.get("winery")),
+        canonical_wine_key(row.get("winery"), row.get("wine")),
+        None if pd.isna(row.get("vintage")) else float(row.get("vintage")),
+        None if pd.isna(row.get("price")) else round(float(row.get("price")), 4),
+    )
+
+
+def collapse_equivalent_observations(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse exact product/vintage/price repeats for analysis, preserving the best row."""
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+    out = df.copy()
+    out["_eq_key"] = out.apply(_equivalent_observation_key, axis=1)
+    out["_date"] = pd.to_datetime(out.get("price_date", ""), errors="coerce")
+    conf_rank = out.get("data_confidence", pd.Series("", index=out.index)).fillna("").astype(str).str.casefold().map({"high": 3, "moderate": 2, "low": 1}).fillna(0)
+    enrichment_cols = ["critic_score", "cases_produced", "alcohol_pct"]
+    enrichment = pd.Series(0, index=out.index, dtype=float)
+    for c in enrichment_cols:
+        if c in out.columns:
+            enrichment += out[c].notna().astype(int)
+    if "source_url" in out.columns:
+        enrichment += out["source_url"].fillna("").astype(str).str.strip().ne("").astype(int)
+    out["_quality"] = conf_rank * 10 + enrichment
+    out["_row"] = np.arange(len(out))
+    out = out.sort_values(["_eq_key", "_quality", "_date", "_row"], ascending=[True, True, True, True], na_position="first")
+    out = out.drop_duplicates("_eq_key", keep="last")
+    return out.drop(columns=["_eq_key", "_date", "_quality", "_row"], errors="ignore").reset_index(drop=True)
+
+
+
+def dedupe_storage_observations(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse only true repeated stored observations while preserving price history.
+
+    Different prices and different observation dates remain separate.  Matching is
+    accent/case/punctuation insensitive so a manually typed ``Cotes`` matches
+    ``Côtes`` and EBERLE matches Eberle.
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+    out = normalize_comp_data(df.copy())
+    out["_producer_key"] = out["winery"].map(canonical_producer_key)
+    out["_wine_key"] = out.apply(lambda r: canonical_wine_key(r.get("winery"), r.get("wine")), axis=1)
+    out["_price_type_key"] = out["price_type"].map(canonical_price_type_key)
+    out["_source_scope"] = out.apply(_observation_source_scope, axis=1)
+    out["_date_key"] = out["price_date"].fillna("").astype(str).str.strip()
+    out["_price_key"] = pd.to_numeric(out["price"], errors="coerce").round(4)
+    key = ["_producer_key", "_wine_key", "vintage", "_price_key", "_price_type_key", "_source_scope", "_date_key"]
+
+    conf_rank = out["data_confidence"].fillna("").astype(str).str.casefold().map({"high": 3, "moderate": 2, "low": 1}).fillna(0)
+    enrichment = pd.Series(0, index=out.index, dtype=float)
+    for c in ["critic_score", "cases_produced", "alcohol_pct"]:
+        enrichment += out[c].notna().astype(int)
+    enrichment += out["source_url"].fillna("").astype(str).str.strip().ne("").astype(int)
+    out["_quality"] = conf_rank * 10 + enrichment
+    out["_row"] = np.arange(len(out))
+    out = out.sort_values(key + ["_quality", "_row"], ascending=True, na_position="first")
+    out = out.drop_duplicates(key, keep="last")
+    # Restore the database's original row order so a two-row commit does not
+    # create a noisy full-file reorder in GitHub.
+    out = out.sort_values("_row")
+    return out.drop(columns=[c for c in out.columns if c.startswith("_")], errors="ignore").reset_index(drop=True)
 
 def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
     values = np.asarray(values, dtype=float)
@@ -112,6 +319,12 @@ def normalize_comp_data(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["winery", "wine", "varietal", "graph_category", "general_category", "region", "subregion",
               "price_type", "critic", "product_tier", "source_name", "source_url", "price_date", "data_confidence"]:
         out[c] = out[c].fillna("").astype(str).str.strip()
+    out["winery"] = out["winery"].map(canonicalize_producer_display)
+    # Normalize only exact direct-winery source-name aliases; preserve workbook/merchant provenance.
+    direct_source_key = out["source_name"].map(canonical_producer_key)
+    source_exact = out["source_name"].map(canonical_text_key).isin(set(PRODUCER_DISPLAY_ALIASES))
+    out.loc[source_exact, "source_name"] = out.loc[source_exact, "source_name"].map(canonicalize_producer_display)
+    out["graph_category"] = out.apply(lambda r: reconcile_graph_category(r["graph_category"], r["general_category"], r["varietal"], r["wine"]), axis=1)
     out["estate"] = out["estate"].map(_bool)
     out["single_vineyard"] = out["single_vineyard"].map(_bool)
     out = out[(out["price"] > 0) & out["price"].notna()].copy()
@@ -121,17 +334,17 @@ def normalize_comp_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _observation_source_scope(row: pd.Series) -> str:
-    price_type = _clean_text(row.get("price_type")).casefold()
-    winery_direct = {"winery msrp", "winery retail", "wine club/member price", "historical listed price"}
+    price_type = canonical_price_type_key(row.get("price_type"))
+    winery_direct = {"winery msrp", "winery retail", "wine club member price", "historical listed price"}
     if price_type in winery_direct:
-        return f"winery::{_clean_text(row.get('winery')).casefold()}"
+        return f"winery::{canonical_producer_key(row.get('winery'))}"
     url = _clean_text(row.get("source_url")).casefold()
     if url:
         import re
         m = re.match(r"https?://([^/]+)", url)
         if m:
             return f"site::{m.group(1).removeprefix('www.')}"
-    return f"source::{_clean_text(row.get('source_name')).casefold()}"
+    return f"source::{canonical_text_key(row.get('source_name'))}"
 
 
 def latest_current_observations(df: pd.DataFrame) -> pd.DataFrame:
@@ -145,12 +358,15 @@ def latest_current_observations(df: pd.DataFrame) -> pd.DataFrame:
         return df.copy() if df is not None else pd.DataFrame()
     out = df.copy()
     out["_source_scope"] = out.apply(_observation_source_scope, axis=1)
+    out["_producer_key"] = out["winery"].map(canonical_producer_key)
+    out["_wine_key"] = out.apply(lambda r: canonical_wine_key(r.get("winery"), r.get("wine")), axis=1)
+    out["_price_type_key"] = out["price_type"].map(canonical_price_type_key)
     out["_parsed_price_date"] = pd.to_datetime(out.get("price_date", ""), errors="coerce")
     out["_row_order"] = np.arange(len(out))
-    key = ["winery", "wine", "vintage", "price_type", "_source_scope"]
+    key = ["_producer_key", "_wine_key", "vintage", "_price_type_key", "_source_scope"]
     out = out.sort_values(["_parsed_price_date", "_row_order"], ascending=[True, True], na_position="first")
     out = out.drop_duplicates(key, keep="last")
-    return out.drop(columns=["_source_scope", "_parsed_price_date", "_row_order"], errors="ignore")
+    return out.drop(columns=["_source_scope", "_producer_key", "_wine_key", "_price_type_key", "_parsed_price_date", "_row_order"], errors="ignore")
 
 
 def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.DataFrame:
@@ -171,10 +387,17 @@ def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.Data
     # identity, while the underlying database retains older prices for history.
     if analysis_mode.casefold().startswith("current"):
         comps = latest_current_observations(comps)
+    # A duplicate row from capitalization, punctuation, accents, or an alternate source
+    # must not receive extra model weight.
+    comps = collapse_equivalent_observations(comps)
 
+    target_producer_key = canonical_producer_key(winery)
+    target_wine_key = canonical_wine_key(winery, wine)
+    comp_producer_keys = comps["winery"].map(canonical_producer_key)
+    comp_wine_keys = comps.apply(lambda r: canonical_wine_key(r.get("winery"), r.get("wine")), axis=1)
     exact_target = (
-        comps["winery"].str.casefold().eq(winery.casefold()) &
-        comps["wine"].str.casefold().eq(wine.casefold()) &
+        comp_producer_keys.eq(target_producer_key) &
+        comp_wine_keys.eq(target_wine_key) &
         comps["vintage"].eq(vintage)
     )
     comps = comps.loc[~exact_target].copy()
@@ -199,8 +422,8 @@ def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.Data
             critic_s = math.exp(-abs(critic - r["critic_score"]) / 8.0)
         else:
             critic_s = 0.84
-        same_producer = bool(winery) and r["winery"].casefold() == winery.casefold()
-        same_label = same_producer and bool(wine) and r["wine"].casefold() == wine.casefold()
+        same_producer = bool(winery) and canonical_producer_key(r["winery"]) == target_producer_key
+        same_label = same_producer and bool(wine) and canonical_wine_key(r["winery"], r["wine"]) == target_wine_key
         same_tier = tier and r["product_tier"] == tier
         label_factor = 5.0 if same_label else (1.42 if same_producer and same_tier else 1.15 if same_producer else 1.0)
         source = _source_confidence(r["data_confidence"])
@@ -209,9 +432,9 @@ def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.Data
     comps["similarity_weight"] = comps.apply(score, axis=1)
 
     def reason(r):
-        if winery and wine and r["winery"].casefold() == winery.casefold() and r["wine"].casefold() == wine.casefold():
+        if winery and wine and canonical_producer_key(r["winery"]) == target_producer_key and canonical_wine_key(r["winery"], r["wine"]) == target_wine_key:
             return "Same label / other vintage"
-        if winery and r["winery"].casefold() == winery.casefold() and r["product_tier"] == tier:
+        if winery and canonical_producer_key(r["winery"]) == target_producer_key and r["product_tier"] == tier:
             return "Same winery / same tier"
         if r["graph_category"].casefold() == graph.casefold() and r["product_tier"] == tier:
             return "Same category / same tier"
@@ -224,9 +447,9 @@ def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.Data
     # Stage selection: get high-quality exact-category/tier observations first, then fill only as needed.
     stages = [
         comps[comps["comp_reason"] == "Same label / other vintage"],
-        comps[comps["comp_reason"] == "Same winery / same tier"],
         comps[comps["comp_reason"] == "Same category / same tier"],
         comps[comps["comp_reason"] == "Same category / other tier"],
+        comps[comps["comp_reason"] == "Same winery / same tier"],
         comps[comps["comp_reason"] == "Adjacent category fallback"],
     ]
     selected = []
@@ -353,15 +576,19 @@ def _confidence(target: Dict, comps: pd.DataFrame, context: pd.DataFrame | None)
         coverage_score, coverage_label = 6, "Weak"
         notes.append("Few comparable observations are available.")
 
-    target_graph = _clean_text(target.get("graph_category") or target.get("varietal")).casefold()
-    exact_cat = (comps["graph_category"].str.casefold() == target_graph).mean() if n and target_graph else 0
+    target_graph = canonical_text_key(target.get("graph_category") or target.get("varietal"))
+    weights = pd.to_numeric(comps.get("similarity_weight", pd.Series(1.0, index=comps.index)), errors="coerce").fillna(0.0) if n else pd.Series(dtype=float)
+    weight_total = float(weights.sum()) if n else 0.0
+    cat_mask = comps["graph_category"].map(canonical_text_key).eq(target_graph) if n and target_graph else pd.Series(False, index=comps.index)
+    exact_cat = float(weights[cat_mask].sum() / weight_total) if weight_total > 0 else 0.0
     cat_score = int(22 * exact_cat)
-    cat_label = "Strong" if exact_cat >= .75 else "Moderate" if exact_cat >= .45 else "Limited"
+    cat_label = "Strong" if exact_cat >= .70 else "Moderate" if exact_cat >= .40 else "Limited"
 
     target_tier = _clean_text(target.get("product_tier") or "Core")
-    exact_tier = (comps["product_tier"] == target_tier).mean() if n else 0
+    tier_mask = comps["product_tier"].eq(target_tier) if n else pd.Series(False, index=comps.index)
+    exact_tier = float(weights[tier_mask].sum() / weight_total) if weight_total > 0 else 0.0
     tier_score = int(18 * exact_tier)
-    tier_label = "Strong" if exact_tier >= .65 else "Moderate" if exact_tier >= .35 else "Limited"
+    tier_label = "Strong" if exact_tier >= .55 else "Moderate" if exact_tier >= .30 else "Limited"
 
     same_label_n = int((comps["comp_reason"] == "Same label / other vintage").sum()) if n and "comp_reason" in comps else 0
     history_score = min(12, same_label_n * 5)
