@@ -1,48 +1,105 @@
-# Rudder Analytics — Wine Market Intelligence v0.2
+# Rudder Analytics — Wine Market Intelligence v0.3
 
-This build folds the expanded Paso Robles pricing workbook and the public-data layer into the main Wine Market Intelligence repository. The data layer remains logically separate, but for the MVP it lives inside the same repo under `data/` and the **Data Hub (Admin)** workspace. A separate database service is not required yet.
+v0.3 adds **AI Screenshot Intake** to the v0.2 comparable-market/public-data architecture. A Rudder administrator can upload 1–4 screenshots of one wine product/shop page, have OpenAI vision extract only visibly supported facts, review/edit the proposed comp row, and add the approved observation to the current Data Hub session.
 
-## What changed from v0.1
+The customer-facing Pricing Analysis remains separate from this admin workflow.
 
-- Replaced the small starter comp set with **122 usable pricing observations**: 120 priced records normalized from `Wine Prices_Paso - 2025-11-15.xlsx`, plus two Eberle public enrichment records retained from v0.1.
-- Coverage now includes Détente, Eberle, Vina Robles, Peachy Canyon, and Austin Hope.
-- Added stronger product-tier matching so Reserve/Flagship wines have less influence on Core-tier recommendations.
-- Added a staged comparable hierarchy: same label / prior vintages → same winery & tier → same category & tier → broader fallback.
-- Added **Historical backtest** mode that excludes later vintages.
-- Added explainable confidence components rather than only one unexplained score.
-- Renamed strategies to **Volume-Oriented / Market-Aligned / Premium Positioning** until winery-specific demand elasticity is available.
-- Added public market context with a small capped effect (±4%).
-- Added an internal **Data Hub (Admin)** page for workbook imports, manual comp additions, downloads, and public-data refresh status.
-- Added government/open-data connectors for BLS, TTB, and USDA/NASS.
-- Added a weekly GitHub Action to refresh public data and commit the refreshed cache back to the repository.
+## What changed from v0.2
+
+- Added `vision_intake.py` for screenshot-to-structured-wine extraction.
+- Added **Screenshot Intake** at the top of **Data Hub (Admin)**.
+- Supports 1–4 PNG/JPG/JPEG/WebP screenshots for a single wine.
+- Uses the OpenAI Responses API with image input + strict JSON Schema output.
+- Default model: `gpt-5.6-terra`; Luna and Sol can be selected by an admin.
+- AI extracts literal page facts; deterministic Rudder rules then infer:
+  - market category;
+  - general category;
+  - price type;
+  - product tier;
+  - Estate status;
+  - Single-vineyard status.
+- Club/member prices are detected and shown to the reviewer but are not silently substituted for the ordinary public bottle price.
+- Wine-competition scores/medals are kept separate from named editorial critic scores.
+- Adds a duplicate check on winery + wine + vintage before approval.
+- All proposed fields remain editable before approval.
+- Approved rows are added only to the current session until the merged comp CSV is downloaded and committed to GitHub.
+- Existing v0.2 workbook import, manual entry, public-data refresh, pricing model and GitHub Action remain intact.
 
 ## Architecture
 
 ```text
-Rudder workbook + manual researched comps
-                  \
-                   -> data/wine_comps.csv -> pricing engine -> customer result
-                  /
-BLS / TTB / USDA public data
-        -> data/public_context.csv + data/raw/
+Admin-captured winery/retailer screenshots
+              ↓
+OpenAI vision structured extraction
+              ↓
+Rudder deterministic classification rules
+              ↓
+Human review + duplicate check
+              ↓
+Approved session comp
+              ↓
+Download merged wine_comps.csv
+              ↓
+GitHub / Data Hub seed
+              ↓
+Wine Market Intelligence pricing engine
+
+Rudder historical workbook + manual comps ────────┘
+BLS / TTB / USDA public context ──────────────────┘
 ```
 
-For this stage, keeping the data in the same GitHub repository is simpler than running a second app and database. The split is still clean in code: pricing logic reads normalized data; Data Hub handles ingestion and refreshes.
+## OpenAI setup
 
-Move the shared data layer to Supabase/PostgreSQL when one or more of these become true:
+The screenshot tool requires an OpenAI API key. Keep the key in Streamlit Secrets; do **not** commit it to GitHub.
 
-1. multiple Rudder staff need to edit records concurrently;
-2. customers need persistent uploads/history;
-3. scheduled collectors are writing many records per day;
-4. the comp database grows beyond what is comfortable in versioned CSV files.
+In Streamlit Community Cloud, open the app's settings/secrets and add:
 
-## Deploy to Streamlit
+```toml
+OPENAI_API_KEY = "sk-..."
+OPENAI_VISION_MODEL = "gpt-5.6-terra"
+```
 
-Upload the contents of this folder to the existing Wine Market Intelligence GitHub repository (or a new v0.2 branch while testing). The repository root should contain:
+`OPENAI_VISION_MODEL` is optional. If omitted, the app defaults to `gpt-5.6-terra`.
+
+Local development can instead use environment variables with the same names.
+
+The Responses request uses `store=False` and only runs after an administrator explicitly clicks **Extract wine details with AI**.
+
+## Screenshot Intake workflow
+
+1. Open **Data Hub (Admin)**.
+2. Upload 1–4 screenshots from one wine product page.
+3. Paste the source URL for provenance (the app does not automatically visit it).
+4. Choose the source type: Official winery site, Retailer / merchant, or Other public source.
+5. Click **Extract wine details with AI**.
+6. Review extraction warnings/evidence.
+7. Edit the proposed comp fields as needed.
+8. Review any same-wine/vintage duplicate warning.
+9. Click **Approve & add comparable to this session**.
+10. Use **Download merged comp database** and replace `data/wine_comps.csv` in GitHub to persist the additions.
+
+### Extraction rules
+
+The AI is instructed to use only facts visible in the supplied screenshots and return `null` for missing facts. Rudder does not ask it to guess case production, critic scores, appellation, or other absent data.
+
+Rudder's deterministic rules then apply the database conventions established for the project:
+
+- **Winery MSRP** only when the page explicitly labels MSRP/SRP/Suggested Retail/List Price.
+- An unlabeled purchase price on an official winery shop page becomes **Winery retail**.
+- A merchant price becomes **Observed retail**.
+- Product tier uses explicit words first: Flagship/Icon/Benchmark → Flagship; Reserve → Reserve; Estate → Estate; Limited/Cellar Club → Limited; otherwise Core.
+- `single_vineyard = TRUE` only when visible evidence clearly ties the finished wine to one named vineyard. Multiple vineyard sources force FALSE.
+- Competition scores are shown as evidence but are not automatically placed in the editorial critic-score field.
+
+## Repository structure
 
 ```text
-.streamlit/
 .github/
+    workflows/
+        refresh-public-data.yml
+.streamlit/
+    config.toml
+    secrets.example.toml
 assets/
 data/
 scripts/
@@ -51,47 +108,26 @@ app.py
 data_loader.py
 pricing_engine.py
 public_data.py
+vision_intake.py
+.gitignore
 requirements.txt
 README.md
 SOURCES.md
+run_local.bat
 ```
 
-Streamlit Community Cloud settings:
+The new root-level file for v0.3 is:
 
-- Branch: `main` (or your test branch)
-- Main file: `app.py`
+`vision_intake.py`
 
-## Public data refresh
+`requirements.txt` also adds the official `openai` SDK and Pillow.
 
-The Data Hub includes a **Refresh public data now** button. On Streamlit Community Cloud, files written by that button are temporary because the app filesystem is ephemeral.
+## Public-data refresh
 
-The persistent path is the included GitHub Actions workflow:
+The v0.2 public-data workflow is unchanged: BLS, TTB and USDA/NASS feeds are downloaded through their public/API endpoints and the GitHub Action refreshes them weekly. Screenshot Intake does not crawl or scrape commercial sites; it analyzes only screenshots that a Rudder administrator explicitly uploads.
 
-`.github/workflows/refresh-public-data.yml`
+## Persistence limitation
 
-It runs weekly and can also be triggered manually from GitHub Actions. It currently:
+Streamlit Community Cloud has an ephemeral filesystem. For v0.3, clicking **Approve** changes the Data Hub session only. Persist the new rows by downloading the merged `wine_comps.csv` and committing it to GitHub.
 
-- refreshes BLS Wine at Home CPI;
-- downloads TTB wine yearly/monthly data;
-- downloads TTB wine producer permits;
-- downloads the official 2025 final California Grape Crush CSV;
-- commits refreshed files back to the repo if they changed.
-
-No retailer/winery scraping is required for these public feeds.
-
-## Public-context model use
-
-v0.2 intentionally limits the public context effect. Public market data should fine-tune a comparable-based estimate, not overpower actual bottle-market comps.
-
-Current active context inputs:
-
-- Wine at Home CPI year-over-year change (BLS)
-- California red-wine grape crush year-over-year change (USDA/NASS snapshot)
-
-The combined adjustment is capped at ±4%.
-
-TTB raw data is collected now for later feature engineering and validation; it does not yet directly alter MSRP. NOAA vintage climate is the next planned connector and will require a free NOAA token plus validated station/AVA mapping.
-
-## Important modeling limitation
-
-The current tool recommends **market position**, not expected case sales. Do not interpret the three price strategies as quantified sell-through probabilities. Winery-specific historical sales/pricing data is required before building a true demand-elasticity forecast.
+A later Supabase/PostgreSQL phase can turn approval into a permanent database insert without the download/commit step.

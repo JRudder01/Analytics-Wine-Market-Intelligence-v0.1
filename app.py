@@ -18,6 +18,15 @@ from data_loader import (
 )
 from pricing_engine import analyze_wine, normalize_comp_data
 from public_data import refresh_all_public_data
+from vision_intake import (
+    extract_wine_from_images,
+    build_comp_record,
+    duplicate_matches,
+    TIERS,
+    PRICE_TYPES,
+    CONFIDENCE_LEVELS,
+    get_default_model,
+)
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
@@ -46,7 +55,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & public-context prototype · v0.2</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -66,7 +75,7 @@ def _known_label(r):
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.2 uses the expanded Paso workbook plus public market context.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3 uses the expanded Paso workbook, public market context, and AI-assisted comp intake.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -278,6 +287,193 @@ elif page == "Data Hub (Admin)":
     c.metric("Market categories", all_data["graph_category"].replace("", np.nan).nunique())
     d.metric("Paso observations", int(all_data["region"].str.contains("Paso", case=False, na=False).sum()))
 
+    st.markdown("### Screenshot Intake")
+    st.caption("Upload screenshots you manually captured from a wine product/shop page. AI extracts visible facts, then Rudder applies our classification rules. Nothing is saved until you review and approve it.")
+
+    ss1, ss2 = st.columns([1.25, 1])
+    with ss1:
+        shot_files = st.file_uploader(
+            "Wine product screenshots (1–4)",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            key="vision_shots",
+            help="Use screenshots from one wine/product page at a time. Include price/spec sections when possible.",
+        )
+        vision_source_url = st.text_input(
+            "Source URL",
+            key="vision_source_url",
+            placeholder="https://winery.example/product/...",
+            help="Stored for auditability; Rudder does not fetch this URL during screenshot extraction.",
+        )
+    with ss2:
+        vision_source_kind = st.selectbox(
+            "Source type",
+            ["Official winery site", "Retailer / merchant", "Other public source"],
+            key="vision_source_kind",
+        )
+        vision_source_name = st.text_input(
+            "Source name override (optional)",
+            key="vision_source_name",
+            placeholder="Eberle Winery",
+        )
+        model_options = ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"]
+        default_model = get_default_model()
+        model_idx = model_options.index(default_model) if default_model in model_options else 0
+        vision_model = st.selectbox(
+            "Vision model",
+            model_options,
+            index=model_idx,
+            key="vision_model",
+            help="Terra is the default balance of extraction quality and cost. Luna is cheaper; Sol is more capable but more expensive.",
+        )
+
+    if shot_files:
+        st.caption(f"{len(shot_files)} screenshot(s) selected. Screenshot content is sent to the configured OpenAI API model only when you click Extract.")
+
+    extract_clicked = st.button(
+        "Extract wine details with AI",
+        type="primary",
+        disabled=not shot_files,
+        key="vision_extract_btn",
+    )
+    if extract_clicked:
+        try:
+            with st.spinner("Reading the screenshots and structuring the visible wine details..."):
+                extracted = extract_wine_from_images(shot_files, model=vision_model)
+            st.session_state.vision_extraction = extracted
+            st.session_state.vision_extraction_source_url = vision_source_url
+            st.session_state.vision_extraction_source_kind = vision_source_kind
+            st.session_state.vision_extraction_source_name = vision_source_name
+            st.success("Extraction complete. Review every field below before adding it to the comp database.")
+        except Exception as exc:
+            st.error(f"Screenshot extraction failed: {exc}")
+
+    extracted = st.session_state.get("vision_extraction")
+    if extracted:
+        proposed = build_comp_record(
+            extracted,
+            source_url=st.session_state.get("vision_extraction_source_url", ""),
+            source_kind=st.session_state.get("vision_extraction_source_kind", "Official winery site"),
+            source_name_override=st.session_state.get("vision_extraction_source_name", ""),
+        )
+
+        warnings = extracted.get("warnings") or []
+        awards = extracted.get("competition_awards") or []
+        if warnings:
+            for warning in warnings:
+                st.warning(f"Vision review note: {warning}")
+
+        with st.expander("Extraction evidence / non-model fields", expanded=False):
+            st.write(f"**Overall vision confidence:** {extracted.get('overall_confidence', 'Moderate')}")
+            st.write(f"**Estate evidence:** {extracted.get('estate_evidence') or 'Not shown'}")
+            st.write(f"**Single-vineyard evidence:** {extracted.get('single_vineyard_evidence') or 'Not shown'}")
+            st.write(f"**Tier evidence:** {extracted.get('tier_evidence') or 'Not shown'}")
+            st.write(f"**Vineyard sources seen:** {', '.join(extracted.get('vineyard_sources') or []) or 'Not shown'}")
+            st.write(f"**Competition awards (not stored as critic scores):** {', '.join(awards) or 'None shown'}")
+            if extracted.get("club_price") is not None:
+                st.write(f"**Club/member price detected:** ${float(extracted['club_price']):,.2f} — shown for reference, not used as the main comp price.")
+
+        duplicates = duplicate_matches(all_data, proposed)
+        if duplicates is not None and not duplicates.empty:
+            st.warning(f"Possible duplicate: {len(duplicates)} existing observation(s) already match this winery + wine + vintage. Review them before adding another price observation.")
+            dup_view = duplicates[["winery", "wine", "vintage", "price", "price_type", "source_name", "price_date"]].copy()
+            st.dataframe(dup_view, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Review extracted comp")
+        st.caption("AI-proposed values are editable. Blank/unknown values should remain blank rather than being guessed.")
+
+        category_options = sorted(set(all_data["graph_category"].replace("", np.nan).dropna().tolist() + [
+            "Cabernet Sauvignon", "Bordeaux Blend", "Rhône Blend", "Red Blend", "Pinot Noir", "Zinfandel",
+            "Petite Sirah", "Syrah", "Grenache", "Mourvèdre", "Merlot", "Cabernet Franc", "Sangiovese",
+            "Barbera", "Chardonnay", "Sauvignon Blanc", "Viognier", "White Blend", "Rosé", "Sparkling", "Other"
+        ]))
+        graph_default = proposed.get("graph_category") or "Other"
+        if graph_default not in category_options:
+            category_options.append(graph_default)
+            category_options = sorted(set(category_options))
+
+        with st.form("vision_review_form"):
+            r1, r2, r3, r4 = st.columns(4)
+            rv_winery = r1.text_input("Winery / producer", value=proposed.get("winery", ""), key="rv_winery")
+            rv_wine = r2.text_input("Wine / label", value=proposed.get("wine", ""), key="rv_wine")
+            rv_vintage = r3.number_input("Vintage", min_value=1900, max_value=2100,
+                                         value=int(proposed.get("vintage") or pd.Timestamp.today().year), step=1, key="rv_vintage")
+            rv_price = r4.number_input("Price", min_value=0.0, value=float(proposed.get("price") or 0.0), step=1.0, format="%.2f", key="rv_price")
+
+            r1, r2, r3, r4 = st.columns(4)
+            rv_varietal = r1.text_input("Varietal / blend", value=proposed.get("varietal", ""), key="rv_varietal")
+            rv_graph = r2.selectbox("Market category", category_options,
+                                    index=category_options.index(graph_default), key="rv_graph")
+            general_options = ["Red", "White", "Rosé", "Sparkling", "Dessert/Other"]
+            gen_default = proposed.get("general_category") if proposed.get("general_category") in general_options else "Red"
+            rv_general = r3.selectbox("General category", general_options, index=general_options.index(gen_default), key="rv_general")
+            rv_tier_default = proposed.get("product_tier") if proposed.get("product_tier") in TIERS else "Core"
+            rv_tier = r4.selectbox("Product tier", TIERS, index=TIERS.index(rv_tier_default), key="rv_tier")
+
+            r1, r2, r3, r4 = st.columns(4)
+            rv_region = r1.text_input("Region / AVA", value=proposed.get("region", ""), key="rv_region")
+            rv_subregion = r2.text_input("Sub-AVA / district", value=proposed.get("subregion", ""), key="rv_subregion")
+            price_type_default = proposed.get("price_type") if proposed.get("price_type") in PRICE_TYPES else "Observed retail"
+            rv_price_type = r3.selectbox("Price type", PRICE_TYPES, index=PRICE_TYPES.index(price_type_default), key="rv_price_type")
+            conf_default = proposed.get("data_confidence") if proposed.get("data_confidence") in CONFIDENCE_LEVELS else "Moderate"
+            rv_conf = r4.selectbox("Data confidence", CONFIDENCE_LEVELS, index=CONFIDENCE_LEVELS.index(conf_default), key="rv_conf")
+
+            r1, r2, r3, r4 = st.columns(4)
+            rv_critic = r1.text_input("Critic (optional)", value=proposed.get("critic", ""), key="rv_critic")
+            rv_score = r2.number_input("Critic score (optional)", min_value=0.0, max_value=100.0,
+                                       value=float(proposed.get("critic_score") or 0.0), step=1.0, key="rv_score")
+            rv_cases = r3.number_input("Cases produced (optional)", min_value=0,
+                                       value=int(proposed.get("cases_produced") or 0), step=50, key="rv_cases")
+            rv_abv = r4.number_input("Alcohol % (optional)", min_value=0.0, max_value=30.0,
+                                     value=float(proposed.get("alcohol_pct") or 0.0), step=0.1, format="%.1f", key="rv_abv")
+
+            r1, r2, r3, r4 = st.columns(4)
+            rv_estate = r1.checkbox("Estate", value=bool(proposed.get("estate", False)), key="rv_estate")
+            rv_single = r2.checkbox("Single vineyard", value=bool(proposed.get("single_vineyard", False)), key="rv_single")
+            rv_source_name = r3.text_input("Source name", value=proposed.get("source_name", ""), key="rv_source_name")
+            rv_price_date = r4.text_input("Price observed date", value=proposed.get("price_date", pd.Timestamp.today().date().isoformat()), key="rv_price_date")
+            rv_source_url = st.text_input("Source URL", value=proposed.get("source_url", ""), key="rv_source_url")
+
+            approved = st.form_submit_button("Approve & add comparable to this session", type="primary")
+
+        if approved:
+            required_missing = []
+            if not rv_winery.strip(): required_missing.append("winery")
+            if not rv_wine.strip(): required_missing.append("wine")
+            if not rv_region.strip(): required_missing.append("region")
+            if rv_price <= 0: required_missing.append("positive price")
+            if required_missing:
+                st.error("Cannot add comp; missing: " + ", ".join(required_missing))
+            else:
+                approved_record = pd.DataFrame([{
+                    "winery": rv_winery.strip(),
+                    "wine": rv_wine.strip(),
+                    "vintage": rv_vintage,
+                    "varietal": rv_varietal.strip(),
+                    "graph_category": rv_graph,
+                    "general_category": rv_general,
+                    "region": rv_region.strip(),
+                    "subregion": rv_subregion.strip(),
+                    "price": rv_price,
+                    "price_type": rv_price_type,
+                    "critic": rv_critic.strip(),
+                    "critic_score": rv_score if rv_score > 0 else np.nan,
+                    "cases_produced": rv_cases if rv_cases > 0 else np.nan,
+                    "alcohol_pct": rv_abv if rv_abv > 0 else np.nan,
+                    "estate": rv_estate,
+                    "single_vineyard": rv_single,
+                    "product_tier": rv_tier,
+                    "source_name": rv_source_name.strip(),
+                    "source_url": rv_source_url.strip(),
+                    "price_date": rv_price_date.strip(),
+                    "data_confidence": rv_conf,
+                }])
+                current = st.session_state.uploaded_comps
+                combined = pd.concat([current, approved_record], ignore_index=True) if current is not None else approved_record
+                st.session_state.uploaded_comps = normalize_comp_data(combined)
+                st.session_state.vision_extraction = None
+                st.success("Comparable approved and added to this session. Use Download merged comp database below to persist the updated file in GitHub.")
+
     st.markdown("### Comp database")
     source_counts = all_data.groupby(["source_name", "data_confidence"], dropna=False).size().reset_index(name="Observations")
     st.dataframe(source_counts.rename(columns={"source_name": "Source", "data_confidence": "Confidence"}), use_container_width=True, hide_index=True)
@@ -369,7 +565,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.2 approach
+### v0.3 approach
 
 Rudder estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
@@ -386,5 +582,7 @@ Rudder estimates a market-supported bottle-price range from a weighted comparabl
 **Public market context** is intentionally light-touch and capped at ±4% in v0.2. The current seed uses BLS Wine at Home CPI and California red-wine grape-crush conditions; TTB/USDA raw feeds are collected for expansion, and NOAA vintage-weather enrichment is the next public-data connector.
 
 The model is a market-positioning aid, not a guarantee of demand or sell-through. Winery-specific sales history will be needed before Rudder should make quantitative demand forecasts.
+
+**Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by a Rudder administrator. The AI extracts visible facts only; Rudder applies deterministic classification rules; a human must review/edit the proposed row before it is added to the session comp database.
         """
     )
