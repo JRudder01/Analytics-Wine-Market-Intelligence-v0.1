@@ -140,15 +140,21 @@ def reconcile_graph_category(graph_category: str, general_category: str, varieta
     if len(named) < 2:
         return graph
 
-    # Respect existing curated blend labels unless the blend is clearly incompatible.
+    # Respect existing curated blend labels unless the style/color makes the label
+    # misleading for comparable-market matching. A white Rhône-style blend is
+    # intentionally stored/matched as White Blend so it cannot receive full
+    # category credit from red GSM/Rhône wines.
     known_blends = {"bordeaux blend", "rhone blend", "white blend", "red blend", "zinfandel blend"}
     if graph_key in known_blends:
+        general_key = canonical_text_key(general)
+        if graph_key == "rhone blend" and general_key == "white":
+            return "White Blend"
         if graph_key == "rhone blend":
             rhone_red = {"grenache", "syrah", "mourvedre", "counoise", "cinsault", "carignan", "petite sirah"}
             keys = {key for _, key, _ in named}
             non_rhone = keys - rhone_red
             # Only override when several clearly non-Rhône grapes make the label untenable.
-            if canonical_text_key(general) == "red" and len(non_rhone) >= 2 and len(non_rhone) >= len(keys & rhone_red):
+            if general_key == "red" and len(non_rhone) >= 2 and len(non_rhone) >= len(keys & rhone_red):
                 return "Red Blend"
         return graph
 
@@ -269,13 +275,34 @@ def _tier_similarity(target: str, comp: str) -> float:
     return {1: 0.52, 2: 0.26, 3: 0.14, 4: 0.08, 5: 0.05}.get(d, 0.05)
 
 
+def _general_categories_compatible(target_general: str, comp_general: str) -> bool:
+    """Return True when broad wine color/style does not conflict.
+
+    Missing values are treated as unknown rather than incompatible. Rosé remains
+    distinct from both Red and White for exact-category matching.
+    """
+    tg = canonical_text_key(target_general)
+    cg = canonical_text_key(comp_general)
+    if not tg or not cg:
+        return True
+    return tg == cg
+
+
 def _category_similarity(target_graph: str, comp_graph: str, target_general: str, comp_general: str) -> float:
-    if target_graph and comp_graph and target_graph.casefold() == comp_graph.casefold():
+    tg = canonical_text_key(target_graph)
+    cg = canonical_text_key(comp_graph)
+    general_match = _general_categories_compatible(target_general, comp_general)
+
+    # A Red and White wine must never receive full category credit merely because
+    # both were labeled Rhône Blend (or any other shared graph category).
+    if not general_match:
+        return 0.02
+    if tg and cg and tg == cg:
         return 1.0
     cab_bordeaux = {"cabernet sauvignon", "bordeaux blend"}
-    if target_graph.casefold() in cab_bordeaux and comp_graph.casefold() in cab_bordeaux:
+    if tg in cab_bordeaux and cg in cab_bordeaux:
         return 0.56
-    if target_general and comp_general and target_general.casefold() == comp_general.casefold():
+    if target_general and comp_general and canonical_text_key(target_general) == canonical_text_key(comp_general):
         return 0.20
     return 0.06
 
@@ -436,9 +463,11 @@ def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.Data
             return "Same label / other vintage"
         if winery and canonical_producer_key(r["winery"]) == target_producer_key and r["product_tier"] == tier:
             return "Same winery / same tier"
-        if r["graph_category"].casefold() == graph.casefold() and r["product_tier"] == tier:
+        same_graph = canonical_text_key(r["graph_category"]) == canonical_text_key(graph)
+        same_general = _general_categories_compatible(general, r["general_category"])
+        if same_graph and same_general and r["product_tier"] == tier:
             return "Same category / same tier"
-        if r["graph_category"].casefold() == graph.casefold():
+        if same_graph and same_general:
             return "Same category / other tier"
         return "Adjacent category fallback"
 

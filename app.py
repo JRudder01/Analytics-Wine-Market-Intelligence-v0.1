@@ -70,7 +70,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.11</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.12</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -104,7 +104,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.11 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category mapping, normalized comp identities, a single accent-insensitive known-wine autocomplete, and reset-safe screenshot intake.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.12 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, and reset-safe screenshot intake.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -321,7 +321,12 @@ if page == "Pricing Analysis":
         with right:
             st.markdown("#### Comparable price landscape")
             plot_df = result["comps"].copy()
-            plot_df["Vintage"] = plot_df["vintage"].fillna(vintage)
+            plot_df["Vintage"] = (
+                pd.to_numeric(plot_df["vintage"], errors="coerce")
+                .fillna(vintage)
+                .round(0)
+                .astype(int)
+            )
             fig = px.scatter(
                 plot_df,
                 x="Vintage",
@@ -332,6 +337,7 @@ if page == "Pricing Analysis":
                 labels={"price": "Observed price ($)", "winery": "Winery", "product_tier": "Tier"},
             )
             fig.add_hline(y=result["scenarios"][1]["msrp"], line_dash="dash", annotation_text="Rudder market-aligned")
+            fig.update_xaxes(dtick=1, tickformat="d")
             fig.update_layout(height=410, margin=dict(l=10, r=10, t=15, b=10))
             st.plotly_chart(fig, use_container_width=True)
 

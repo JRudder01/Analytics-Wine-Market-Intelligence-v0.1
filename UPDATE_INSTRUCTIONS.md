@@ -1,20 +1,14 @@
-# Rudder Wine Market Intelligence v0.3.11 — Single known-wine search
+# Update instructions — v0.3.12
 
-This patch streamlines the Pricing Analysis "Start from a known wine" workflow into **one autocomplete field**.
-
-## Replace these root-level files
+Replace these files in the repository root:
 
 - `app.py`
-- `requirements.txt`
+- `pricing_engine.py`
 
-## What changed
+Replace this database file:
 
-- Removed the separate **Search known wines** + **Known wine** controls.
-- Added one **Known wine** autocomplete that both searches and selects.
-- Search remains normalized for accents, capitalization, punctuation, spaces, and hyphens.
-- Examples such as `cotes du rob blanc` can match `Côtes-du-Rôbles Blanc`.
-- Winery, vintage, and wine terms can be mixed in the same search.
-- Repeated identical visible wine labels are suppressed from the selector.
-- Includes a deployment-safe fallback to Streamlit's built-in selector if the autocomplete component is unavailable.
+- `data/wine_comps.csv`
 
-After committing both files, let Streamlit rebuild so it installs `streamlit-searchbox`.
+No Streamlit secret or requirements changes are needed.
+
+After GitHub/Streamlit redeploys, re-run the Eberle `Cotes du Robles Blanc` test. It should load as `White Blend`, red Rhône wines should no longer receive full same-category credit, and the price-landscape x-axis should show integer years only.
