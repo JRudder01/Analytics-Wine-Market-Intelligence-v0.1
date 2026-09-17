@@ -1,2 +1,0 @@
-winery,wine,vintage,varietal,graph_category,general_category,region,subregion,price,price_type,critic,critic_score,cases_produced,alcohol_pct,estate,single_vineyard,product_tier,source_name,source_url,price_date,data_confidence
-Example Winery,Reserve Cabernet Sauvignon,2024,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,75,MSRP,Wine Enthusiast,93,850,14.5,True,False,Reserve,Winery tech sheet,https://example.com,2026-09-17,High
