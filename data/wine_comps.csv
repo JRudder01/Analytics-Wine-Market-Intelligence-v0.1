@@ -13,8 +13,8 @@ Eberle,Barbera,2022.0,Barbera,Barbera,Red,Paso Robles,,48.0,Historical listed pr
 Eberle,Cellar Club Le Petit Sanglier,2023.0,"Merlot, Cabernet Sauvignon, Petit Verdot, Tannat",Bordeaux Blend,Red,Paso Robles,,58.0,Historical listed price,,,,,False,False,Limited,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Eberle,Still Water Cabernet Sauvignon,2021.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,58.0,Historical listed price,,,,,False,False,Estate,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Eberle,Estate Cabernet Sauvignon,2022.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,60.0,Historical listed price,,,,,True,False,Estate,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
-Eberle,Estate Cabernet Sauvignon,2023.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,60.0,Winery retail / workbook,,,,14.5,True,False,Estate,Eberle Winery + Rudder workbook,https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=CABERNET23,2026-09-17,High
-Eberle,Vineyard Selection Cabernet Sauvignon,2023.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,30.0,Winery retail / workbook,Wine Enthusiast,91.0,,13.9,False,False,Core,Eberle Winery + Rudder workbook,https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=VBCAB23,2026-09-17,High
+Eberle,Estate Cabernet Sauvignon,2023.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,60.0,Winery retail,,,,14.5,True,False,Estate,Eberle Winery + Rudder workbook,https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=CABERNET23,2026-09-17,High
+Eberle,Vineyard Selection Cabernet Sauvignon,2023.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,30.0,Winery retail,Wine Enthusiast,91.0,,13.9,False,False,Core,Eberle Winery + Rudder workbook,https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=VBCAB23,2026-09-17,High
 Eberle,Cellar Club Grenache,2023.0,Grenache,Grenache,Red,Paso Robles,,60.0,Historical listed price,,,,,False,False,Limited,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Eberle,Vintage of Valor,2023.0,"Cabernet Sauvignon, Barbera, Zinfandel",Red Blend,Red,Paso Robles,,35.0,Historical listed price,,,,,False,False,Core,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Eberle,Cellar Club Cab/Shiraz,2022.0,"Cabernet Sauvignon, Shiraz",Red Blend,Red,Paso Robles,,60.0,Historical listed price,,,,,False,False,Limited,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
@@ -29,7 +29,7 @@ Eberle,Zinfandel,2023.0,Zinfandel,Zinfandel,Red,Paso Robles,,40.0,Historical lis
 Eberle,Cotes-du-Robles Rose,2023.0,Grenache,Rosé,Rosé,Paso Robles,,32.0,Historical listed price,,,,,False,False,Core,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Eberle,Estate Chardonnay,2023.0,Chardonnay,Chardonnay,White,Paso Robles,,35.0,Historical listed price,,,,,True,False,Estate,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Eberle,Cotes-du-Robles Blanc,2023.0,"Grenache Blanc, Picpoul Blanc, Viognier",Rhone Blend,White,Paso Robles,,34.0,Historical listed price,,,,,False,False,Core,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
-Eberle,Full Boar White,2024.0,"Chardonnay, Viognier, Grenache Blanc, Picpoul",White Blen,White,Paso Robles,,30.0,Historical listed price,,,,,False,False,Core,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
+Eberle,Full Boar White,2024.0,"Chardonnay, Viognier, Grenache Blanc, Picpoul",White Blend,White,Paso Robles,,30.0,Historical listed price,,,,,False,False,Core,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Eberle,Estate Viognier,2024.0,Viognier,Viognier,White,Paso Robles,,40.0,Historical listed price,,,,,True,False,Estate,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Vina Robles,Limited Estate Cabernet Sauvignon,2022.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,40.0,Historical listed price,,,,,True,False,Estate,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Vina Robles,Mountain Road Reserve,2021.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,68.0,Historical listed price,,,,,False,False,Reserve,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
@@ -119,22 +119,20 @@ Austin Hope,Treana Cabernet Sauvignon,2023.0,Cabernet Sauvignon,Cabernet Sauvign
 Austin Hope,Treana Red Reserve,2022.0,Red Blend,Red Blend,Red,Paso Robles,,103.0,Historical listed price,,,,,False,False,Reserve,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Austin Hope,Treana Sauvignon Blanc,2022.0,Sauvignon Blanc,Sauvignon Blanc,White,Paso Robles,,25.0,Historical listed price,,,,,False,False,Core,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
 Austin Hope,Troublemaker,,Red Blend,Red Blend,Red,Paso Robles,,20.0,Historical listed price,,,,,False,False,Value/Core,Wine Prices_Paso - 2025-11-15.xlsx,,2025-11-15,Moderate
-Eberle,Reserve Cabernet Sauvignon,2021.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,125.0,Winery retail,,,,14.5,True,False,Flagship,Eberle Winery,https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=CABRES21,2026-09-17,High
-Eberle,Vineyard Selection Cabernet Sauvignon,2024.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,32.0,Winery retail,,,,,False,False,Core,Eberle Winery,https://shop.eberlewinery.com/SHOP.AMS?CATCODE=CLUB&LEVEL=MID,2026-09-17,High
-Eberle,COTES-DU-ROBLES ROSÉ,2025.0,100% Grenache,Grenache,Rosé,Paso Robles,,32.0,Winery retail,,,,12.8,False,False,Core,Eberle,,2026-09-17,High
+Eberle,Reserve Cabernet Sauvignon,2021.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,125.0,Winery retail,,,,14.5,True,False,Flagship,Eberle,https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=CABRES21,2026-09-17,High
+Eberle,Vineyard Selection Cabernet Sauvignon,2024.0,Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,32.0,Winery retail,,,,,False,False,Core,Eberle,https://shop.eberlewinery.com/SHOP.AMS?CATCODE=CLUB&LEVEL=MID,2026-09-17,High
+Eberle,COTES-DU-ROBLES ROSÉ,2025.0,100% Grenache,Rosé,Rosé,Paso Robles,,32.0,Winery retail,,,,12.8,False,False,Core,Eberle,,2026-09-17,High
 Eberle,Muscat Canelli,2025.0,100% Muscat Canelli,Other,White,Paso Robles,,24.0,Winery retail,,,,10.5,True,False,Estate,Eberle,,2026-09-17,High
 Eberle,Reserve Chardonnay,2024.0,100% Chardonnay,Chardonnay,White,Paso Robles,,48.0,Winery retail,,,,13.8,True,False,Reserve,Eberle,,2026-09-17,High
-Eberle,Soak Up the Sun Vino Verde,2025.0,"50% Alcarinho, 50% Vermentino",White Blend,White,Paso Robles,,35.0,Winery retail,,,,12.4,False,True,Core,Eberle,,2026-09-17,High
+Eberle,Soak Up the Sun Vino Verde,2025.0,"50% Alvarinho, 50% Vermentino",White Blend,White,Paso Robles,,35.0,Winery retail,,,,12.4,False,True,Core,Eberle,,2026-09-17,High
 Eberle,Preservative Free,2025.0,"80% Cabernet Sauvignon, 20% Zinfandel",Cabernet Sauvignon,Red,Paso Robles,,35.0,Winery retail,,,60.0,13.8,False,False,Limited,Eberle,,2026-09-17,High
 Eberle,Barbera,2023.0,100% Barbera,Barbera,Red,Paso Robles,,48.0,Winery retail,,,1030.0,14.0,False,False,Limited,Eberle,,2026-09-17,High
-EBERLE,Estate Cabernet Sauvignon,2023.0,100% Estate Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,60.0,Winery retail,,,,14.5,True,False,Estate,EBERLE,,2026-09-17,High
-EBERLE,CÔTES DU RÔBLES ROUGE,2024.0,"56% Grenache, 38% Syrah, 6% Mourvedre",Rhône Blend,Red,Paso Robles,Adelaida District,40.0,Winery retail,,,,13.9,False,False,Core,EBERLE,,2026-09-17,High
-EBERLE,FULL BOAR RED,2026.0,"Barbera, Grenache, Zin, Syrah, Petit Syrah, Sangiovese, Temp",Red Blend,Red,Paso Robles,,30.0,Winery retail,,,,14.0,False,False,Core,EBERLE,,2026-09-17,High
+Eberle,CÔTES DU RÔBLES ROUGE,2024.0,"56% Grenache, 38% Syrah, 6% Mourvedre",Rhône Blend,Red,Paso Robles,Adelaida District,40.0,Winery retail,,,,13.9,False,False,Core,Eberle,,2026-09-17,High
+Eberle,FULL BOAR RED,,"Barbera, Grenache, Zin, Syrah, Petit Syrah, Sangiovese, Temp",Red Blend,Red,Paso Robles,,30.0,Winery retail,,,,14.0,False,False,Core,Eberle,,2026-09-17,High
 Eberle,Zinfandel,2024.0,100% Zinfandel,Zinfandel,Red,Paso Robles,,40.0,Winery retail,,,,14.4,False,False,Core,Eberle,,2026-09-17,High
-EBERLE,Sangiovese,2023.0,100% Sangiovese,Sangiovese,Red,Paso Robles,,45.0,Winery retail,,,700.0,14.0,False,False,Core,EBERLE,,2026-09-17,High
-EBERLE,STEINBECK SYRAH,2023.0,100% Syrah,Syrah,Red,Paso Robles,,43.0,Winery retail,,,,14.3,False,False,Core,EBERLE,,2026-09-17,High
-EBERLE,Vineyard Selection Cabernet,2023.0,100% Cabernet Sauvignon,Cabernet Sauvignon,Red,Paso Robles,,30.0,Winery retail,Wine Enthusiast,91.0,,13.9,False,False,Core,EBERLE,,2026-09-17,High
-EBERLE,Vintage of Valor,2023.0,"45% Cabernet Sauvignon, 30% Barbera, 25% Zinfandel",Cabernet Sauvignon,Red,Paso Robles,,35.0,Winery retail,,,,14.0,False,False,Core,EBERLE,,2026-09-17,High
+Eberle,Sangiovese,2023.0,100% Sangiovese,Sangiovese,Red,Paso Robles,,45.0,Winery retail,,,700.0,14.0,False,False,Core,Eberle,,2026-09-17,High
+Eberle,STEINBECK SYRAH,2023.0,100% Syrah,Syrah,Red,Paso Robles,,43.0,Winery retail,,,,14.3,False,False,Core,Eberle,,2026-09-17,High
+Eberle,Vintage of Valor,2023.0,"45% Cabernet Sauvignon, 30% Barbera, 25% Zinfandel",Red Blend,Red,Paso Robles,,35.0,Winery retail,,,,14.0,False,False,Core,Eberle,,2026-09-17,High
 Eberle,Vintage Port,2022.0,"70% Trousseau, 30% Touriga",Other,Dessert/Other,Paso Robles,,60.0,Winery retail,,,,19.3,True,False,Core,Eberle,,2026-09-17,High
-EBERLE,Estate Viognier,2025.0,100% Viognier,Viognier,White,Paso Robles,,42.0,Winery retail,,,,13.8,True,False,Estate,EBERLE,,2026-09-17,High
-EBERLE,FULL BOAR WHITE BLEND,2025.0,"45% Chardonnay, 30% Viognier, 15% Grenache Blanc, 10% Picpoul",White Blend,White,Paso Robles,,32.0,Winery retail,,,,13.5,False,False,Core,EBERLE,,2026-09-17,High
+Eberle,Estate Viognier,2025.0,100% Viognier,Viognier,White,Paso Robles,,42.0,Winery retail,,,,13.8,True,False,Estate,Eberle,,2026-09-17,High
+Eberle,FULL BOAR WHITE BLEND,2025.0,"45% Chardonnay, 30% Viognier, 15% Grenache Blanc, 10% Picpoul",White Blend,White,Paso Robles,,32.0,Winery retail,,,,13.5,False,False,Core,Eberle,,2026-09-17,High
