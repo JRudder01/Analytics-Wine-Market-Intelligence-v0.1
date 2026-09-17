@@ -1,7 +1,7 @@
 name: Refresh wine public data
 
-on:
-  workflow_dispatch:
+"on":
+  workflow_dispatch: {}
   schedule:
     - cron: "17 13 * * 2"
 
@@ -11,18 +11,30 @@ permissions:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: python scripts/refresh_public_data.py
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh public wine data
+        run: python scripts/refresh_public_data.py
+
       - name: Commit refreshed public data
         run: |
           git config user.name "rudder-data-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add data/public_context.csv data/raw/ || true
+
+          git add data/public_context.csv
+          git add data/raw/ || true
+
           if git diff --cached --quiet; then
             echo "No public-data changes to commit."
           else
