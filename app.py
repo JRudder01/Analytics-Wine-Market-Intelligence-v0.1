@@ -21,7 +21,7 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-.block-container {padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1280px;}
+.block-container {padding-top: 2.6rem; padding-bottom: 3rem; max-width: 1280px;}
 .ra-subtitle {font-size: 1.08rem; color: #58758d; margin-top: -0.45rem; margin-bottom: 1.2rem;}
 .ra-card {border: 1px solid #dfe8ee; border-radius: 14px; padding: 1rem 1.1rem; background: #ffffff;}
 .ra-note {font-size: 0.88rem; color: #667985;}
