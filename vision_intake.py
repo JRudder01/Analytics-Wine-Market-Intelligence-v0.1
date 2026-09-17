@@ -79,7 +79,7 @@ Rules:
 - explicit_price_label should contain only a visible label such as MSRP, SRP, Suggested Retail, List Price, Retail, or null. Do not invent a label.
 - critic_name/critic_score are for named editorial wine critics/publications. Do NOT put wine-competition scores there. Put competition medals/scores in competition_awards.
 - vineyard_sources should contain named vineyard/source locations explicitly stated for the finished wine or its components.
-- estate_evidence is ONLY for evidence that the FINISHED WINE is estate-designated or that all fruit for the finished wine is explicitly estate-grown/estate-sourced. Do NOT treat a component vineyard/source such as "Picpoul is from Eberle Estate", a winery name containing Estate, or a named "Estate Vineyard" by itself as proof that the finished wine is Estate. In those cases use null unless the wine title/designation itself says Estate or the page explicitly says the finished wine is estate-grown/estate-bottled/100% estate.
+- estate_evidence is ONLY for evidence that the FINISHED WINE is estate-designated or that all fruit for the finished wine is explicitly estate-grown/estate-sourced. Positive examples include a wine title containing Estate; '100% estate-grown fruit'; 'crafted/made/produced from Estate Chardonnay'; 'made entirely from estate fruit'; or an explicit statement that the finished wine comes from the producer's estate vineyard(s). Do NOT treat a component vineyard/source such as 'Picpoul is from Eberle Estate', a winery name containing Estate, or a bare named 'Estate Vineyard' by itself as proof that the finished wine is Estate. In those cases use null unless the wording clearly applies to the whole wine.
 - single_vineyard_evidence should contain visible wording that clearly ties the finished wine to one named vineyard. If multiple vineyard sources are shown, note that in warnings and use null unless the page explicitly calls the finished wine single-vineyard.
 - tier_evidence should contain visible words that describe the FINISHED WINE's market tier, such as Flagship, Reserve, Estate, Limited Release, Cellar Club, icon, benchmark, etc. Do not use "Estate" from a component vineyard/source as tier evidence. Otherwise null.
 - Keep names faithful to the page. Do not rewrite branding.
@@ -203,6 +203,37 @@ def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
+def normalize_direct_winery_name(value: Any) -> str:
+    """Return a stable source/producer label for direct winery records.
+
+    The goal is provenance consistency, not aggressive brand rewriting.  We only
+    remove common generic winery suffixes when they appear at the END of the
+    visible producer name.  Examples: ``Eberle Winery`` -> ``Eberle`` and
+    ``JUSTIN Vineyards & Winery`` -> ``JUSTIN``.
+    """
+    name = re.sub(r"\s+", " ", _text(value)).strip()
+    if not name:
+        return ""
+
+    # Remove trailing corporate/legal punctuation first.
+    name = re.sub(r"[,\s]+(?:LLC|Inc\.?|Incorporated|Ltd\.?|Limited)$", "", name, flags=re.I).strip()
+
+    # Generic producer descriptors are safe to remove only as trailing suffixes.
+    suffix_patterns = [
+        r"\s+Vineyards?\s*(?:&|and)\s*Winery$",
+        r"\s+Winery\s*(?:&|and)\s*Vineyards?$",
+        r"\s+Vineyards?\s*(?:&|and)\s*Cellars?$",
+        r"\s+Winery$",
+        r"\s+Wine\s+Company$",
+    ]
+    for pattern in suffix_patterns:
+        cleaned = re.sub(pattern, "", name, flags=re.I).strip()
+        if cleaned != name and cleaned:
+            name = cleaned
+            break
+    return name
+
+
 def infer_graph_category(varietal_text: str, wine_name: str = "") -> str:
     text = f"{varietal_text} {wine_name}".lower()
     # Specific varietals first.
@@ -303,15 +334,17 @@ def infer_general_category(graph_category: str, varietal_text: str = "", wine_na
 
 
 def infer_estate(wine_name: str, estate_evidence: str | None) -> bool:
-    """Classify Estate only from finished-wine evidence, not component sources.
+    """Classify Estate only from evidence applying to the finished wine.
 
-    Strongest rule: an explicit Estate designation in the wine/label name.
-    Otherwise, require wording that clearly applies estate status to the whole wine.
-    A bare vineyard/source phrase such as "Eberle Estate" or "Estate Vineyard"
-    is intentionally insufficient on its own.
+    Positive signals include an Estate designation in the label/name, explicit
+    estate-grown/estate-bottled wording, or production language tying the WHOLE
+    wine to estate fruit (for example, "crafted from Estate Chardonnay").
+
+    A component source such as "Picpoul is from Eberle Estate" or a bare
+    "Estate Vineyard" phrase remains insufficient on its own.
     """
-    name = _text(wine_name).lower()
-    evidence = _text(estate_evidence).lower()
+    name = _text(wine_name).casefold()
+    evidence = _text(estate_evidence).casefold()
 
     if re.search(r"\bestate\b", name):
         return True
@@ -321,13 +354,20 @@ def infer_estate(wine_name: str, estate_evidence: str | None) -> bool:
     whole_wine_patterns = [
         r"\bestate[- ]grown\b",
         r"\bestate[- ]bottled\b",
+        r"\bestate[- ]sourced\b",
         r"\bestate wine\b",
         r"\bestate designation\b",
-        r"\b100%[^.]{0,40}\bestate\b",
-        r"\ball (?:fruit|grapes)[^.]{0,50}\bestate\b",
-        r"\b(?:entirely|exclusively)[^.]{0,50}\bestate\b",
+        r"\b100%[^.]{0,60}\bestate\b",
+        r"\ball (?:of )?(?:the )?(?:fruit|grapes)[^.]{0,70}\bestate\b",
+        r"\b(?:entirely|exclusively)[^.]{0,70}\bestate\b",
         r"\bfrom (?:our|the) estate vineyard(?:s)?\b",
-        r"\bsourced (?:entirely|exclusively) from[^.]{0,50}\bestate\b",
+        r"\bsourced (?:entirely|exclusively) from[^.]{0,70}\bestate\b",
+        # Captures: 'crafted from sustainably grown Estate Chardonnay',
+        # 'made from our estate Cabernet', 'produced from Estate Viognier'.
+        r"\b(?:crafted|made|produced|vinified) from[^.]{0,90}\bestate\b",
+        # Captures wording like 'estate Chardonnay fruit' when extraction has
+        # already identified it as whole-wine estate evidence.
+        r"\bestate\s+(?:grown\s+)?(?:fruit|grapes|chardonnay|viognier|cabernet|merlot|syrah|grenache|pinot|sauvignon|zinfandel|riesling|muscat|tempranillo|mourv[eè]dre|roussanne|marsanne|picpoul)\b",
     ]
     return any(re.search(pattern, evidence) for pattern in whole_wine_patterns)
 
@@ -375,15 +415,22 @@ def build_comp_record(
     source_kind: str = "Official winery site",
     source_name_override: str = "",
 ) -> dict[str, Any]:
-    winery = _text(extraction.get("winery"))
+    raw_winery = _text(extraction.get("winery"))
+    winery = normalize_direct_winery_name(raw_winery) if source_kind == "Official winery site" else raw_winery
     wine = _text(extraction.get("wine"))
     varietal = _text(extraction.get("varietal_text"))
     graph = infer_graph_category(varietal, wine)
     general = infer_general_category(graph, varietal, wine)
     price_type = infer_price_type(extraction, source_kind)
-    source_name = source_name_override.strip() or _text(extraction.get("source_name_visible"))
-    if not source_name:
-        source_name = winery if source_kind == "Official winery site" else source_kind
+
+    if source_name_override.strip():
+        source_name = source_name_override.strip()
+    elif source_kind == "Official winery site":
+        # Direct winery observations use one canonical brand label so duplicate
+        # and price-update detection does not split Eberle vs Eberle Winery.
+        source_name = winery or normalize_direct_winery_name(extraction.get("source_name_visible"))
+    else:
+        source_name = _text(extraction.get("source_name_visible")) or source_kind
 
     return {
         "winery": winery,
