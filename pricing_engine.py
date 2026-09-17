@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 import math
 import numpy as np
 import pandas as pd
 
-
 TIER_FACTOR = {
-    "Value/Core": 0.95,
+    "Value/Core": 0.94,
     "Core": 1.00,
-    "Estate": 1.12,
-    "Limited": 1.22,
-    "Reserve": 1.35,
-    "Flagship": 1.95,
+    "Estate": 1.10,
+    "Limited": 1.18,
+    "Reserve": 1.30,
+    "Flagship": 1.52,
 }
 
 TIER_ORDER = {
@@ -24,8 +22,6 @@ TIER_ORDER = {
     "Reserve": 4,
     "Flagship": 5,
 }
-
-CONFIDENCE_MAP = {"Low": 0.55, "Moderate": 0.75, "High": 0.95}
 
 
 def _clean_text(v) -> str:
@@ -56,47 +52,48 @@ def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> floa
 
 def _tier_similarity(target: str, comp: str) -> float:
     if not target or not comp:
-        return 0.78
+        return 0.72
     if target == comp:
         return 1.0
     a = TIER_ORDER.get(target, 1)
     b = TIER_ORDER.get(comp, 1)
     d = abs(a - b)
-    return {1: 0.70, 2: 0.48, 3: 0.34, 4: 0.25, 5: 0.20}.get(d, 0.20)
+    # v0.2: intentionally stronger penalty for adjacent tiers than v0.1.
+    return {1: 0.52, 2: 0.26, 3: 0.14, 4: 0.08, 5: 0.05}.get(d, 0.05)
 
 
 def _category_similarity(target_graph: str, comp_graph: str, target_general: str, comp_general: str) -> float:
-    if target_graph and comp_graph and target_graph == comp_graph:
+    if target_graph and comp_graph and target_graph.casefold() == comp_graph.casefold():
         return 1.0
-    cab_bordeaux = {"Cabernet Sauvignon", "Bordeaux Blend"}
-    if target_graph in cab_bordeaux and comp_graph in cab_bordeaux:
-        return 0.68
-    if target_general and comp_general and target_general == comp_general:
-        return 0.35
-    return 0.12
+    cab_bordeaux = {"cabernet sauvignon", "bordeaux blend"}
+    if target_graph.casefold() in cab_bordeaux and comp_graph.casefold() in cab_bordeaux:
+        return 0.56
+    if target_general and comp_general and target_general.casefold() == comp_general.casefold():
+        return 0.20
+    return 0.06
 
 
 def _region_similarity(target_region: str, comp_region: str, target_subregion: str, comp_subregion: str) -> float:
-    tr, cr = target_region.lower(), comp_region.lower()
-    ts, cs = target_subregion.lower(), comp_subregion.lower()
+    tr, cr = target_region.casefold(), comp_region.casefold()
+    ts, cs = target_subregion.casefold(), comp_subregion.casefold()
     if ts and cs and ts == cs:
-        return 1.10
+        return 1.12
     if tr and cr and tr == cr:
         return 1.0
     if not tr or not cr:
-        return 0.70
-    return 0.32
+        return 0.62
+    return 0.24
 
 
 def _source_confidence(v) -> float:
-    s = _clean_text(v).lower()
+    s = _clean_text(v).casefold()
     if s == "high":
         return 1.0
     if s == "moderate":
-        return 0.88
+        return 0.87
     if s == "low":
-        return 0.70
-    return 0.82
+        return 0.68
+    return 0.80
 
 
 def normalize_comp_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -121,7 +118,7 @@ def normalize_comp_data(df: pd.DataFrame) -> pd.DataFrame:
     return out[expected]
 
 
-def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 16) -> pd.DataFrame:
+def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 20) -> pd.DataFrame:
     comps = normalize_comp_data(df)
     winery = _clean_text(target.get("winery"))
     wine = _clean_text(target.get("wine"))
@@ -133,14 +130,19 @@ def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 16) -> pd.Data
     tier = _clean_text(target.get("product_tier") or "Core")
     critic = target.get("critic_score")
     critic = float(critic) if critic not in (None, "") and not pd.isna(critic) else np.nan
+    analysis_mode = _clean_text(target.get("analysis_mode") or "Current market")
 
-    # Avoid price leakage from the exact target vintage.
     exact_target = (
         comps["winery"].str.casefold().eq(winery.casefold()) &
         comps["wine"].str.casefold().eq(wine.casefold()) &
         comps["vintage"].eq(vintage)
     )
     comps = comps.loc[~exact_target].copy()
+
+    # Historical backtests cannot use later vintages. Current-market analysis can.
+    if analysis_mode.casefold().startswith("historical") and np.isfinite(vintage):
+        comps = comps[(comps["vintage"].isna()) | (comps["vintage"] <= vintage)].copy()
+
     if comps.empty:
         return comps
 
@@ -148,128 +150,211 @@ def select_comps(df: pd.DataFrame, target: Dict, max_comps: int = 16) -> pd.Data
         cat = _category_similarity(graph, r["graph_category"], general, r["general_category"])
         reg = _region_similarity(region, r["region"], subregion, r["subregion"])
         if np.isfinite(vintage) and np.isfinite(r["vintage"]):
-            vint = math.exp(-abs(vintage - r["vintage"]) / 5.0)
+            # Adjacent vintages matter more than in v0.1.
+            vint = math.exp(-abs(vintage - r["vintage"]) / 3.5)
         else:
-            vint = 0.72
+            vint = 0.67
         tier_s = _tier_similarity(tier, r["product_tier"])
         if np.isfinite(critic) and np.isfinite(r["critic_score"]):
-            critic_s = math.exp(-abs(critic - r["critic_score"]) / 9.0)
+            critic_s = math.exp(-abs(critic - r["critic_score"]) / 8.0)
         else:
-            critic_s = 0.86
-        same_producer = winery and r["winery"].casefold() == winery.casefold()
-        same_label = same_producer and wine and r["wine"].casefold() == wine.casefold()
-        label_factor = 3.0 if same_label else (1.12 if same_producer else 1.0)
+            critic_s = 0.84
+        same_producer = bool(winery) and r["winery"].casefold() == winery.casefold()
+        same_label = same_producer and bool(wine) and r["wine"].casefold() == wine.casefold()
+        same_tier = tier and r["product_tier"] == tier
+        label_factor = 5.0 if same_label else (1.42 if same_producer and same_tier else 1.15 if same_producer else 1.0)
         source = _source_confidence(r["data_confidence"])
         return cat * reg * vint * tier_s * critic_s * label_factor * source
 
     comps["similarity_weight"] = comps.apply(score, axis=1)
-    # Prefer useful comps, but retain enough fallback observations for an early-stage model.
-    comps = comps[comps["similarity_weight"] >= 0.06].copy()
-    return comps.sort_values("similarity_weight", ascending=False).head(max_comps)
+
+    def reason(r):
+        if winery and wine and r["winery"].casefold() == winery.casefold() and r["wine"].casefold() == wine.casefold():
+            return "Same label / other vintage"
+        if winery and r["winery"].casefold() == winery.casefold() and r["product_tier"] == tier:
+            return "Same winery / same tier"
+        if r["graph_category"].casefold() == graph.casefold() and r["product_tier"] == tier:
+            return "Same category / same tier"
+        if r["graph_category"].casefold() == graph.casefold():
+            return "Same category / other tier"
+        return "Adjacent category fallback"
+
+    comps["comp_reason"] = comps.apply(reason, axis=1)
+
+    # Stage selection: get high-quality exact-category/tier observations first, then fill only as needed.
+    stages = [
+        comps[comps["comp_reason"] == "Same label / other vintage"],
+        comps[comps["comp_reason"] == "Same winery / same tier"],
+        comps[comps["comp_reason"] == "Same category / same tier"],
+        comps[comps["comp_reason"] == "Same category / other tier"],
+        comps[comps["comp_reason"] == "Adjacent category fallback"],
+    ]
+    selected = []
+    seen = set()
+    for stage in stages:
+        stage = stage.sort_values("similarity_weight", ascending=False)
+        for idx, row in stage.iterrows():
+            if idx in seen or row["similarity_weight"] < 0.025:
+                continue
+            selected.append(row)
+            seen.add(idx)
+            if len(selected) >= max_comps:
+                break
+        if len(selected) >= max_comps:
+            break
+    if not selected:
+        return comps.iloc[0:0].copy()
+    return pd.DataFrame(selected).sort_values("similarity_weight", ascending=False).reset_index(drop=True)
 
 
-def _attribute_factor(target: Dict) -> Tuple[float, List[str]]:
+def _attribute_factor(target: Dict) -> Tuple[float, List[str], List[str]]:
     factor = 1.0
-    drivers: List[str] = []
+    upward: List[str] = []
+    downward: List[str] = []
 
     tier = _clean_text(target.get("product_tier") or "Core")
     tf = TIER_FACTOR.get(tier, 1.0)
     factor *= tf
     if tf > 1.02:
-        drivers.append(f"{tier} positioning raises the model relative to core-market comps.")
+        upward.append(f"{tier} positioning supports a premium versus a core-tier reference.")
     elif tf < 0.98:
-        drivers.append(f"{tier} positioning pulls the estimate toward the value end of the market.")
+        downward.append(f"{tier} positioning keeps the recommendation toward the value end of the market.")
 
     critic = target.get("critic_score")
     if critic not in (None, "") and not pd.isna(critic):
         score = float(critic)
-        adj = min(1.25, max(0.82, 1.0 + (score - 90.0) * 0.022))
+        adj = min(1.20, max(0.86, 1.0 + (score - 90.0) * 0.018))
         factor *= adj
-        direction = "supports a premium" if score > 90 else "limits the premium"
-        drivers.append(f"Critic score of {score:.0f} {direction} versus a 90-point reference.")
+        if score > 90:
+            upward.append(f"Critic score of {score:.0f} supports additional pricing power.")
+        elif score < 90:
+            downward.append(f"Critic score of {score:.0f} limits the quality premium versus a 90-point reference.")
 
     estate = _bool(target.get("estate"))
     single = _bool(target.get("single_vineyard"))
     if estate:
-        factor *= 1.035
-        drivers.append("Estate designation adds a modest positioning premium.")
+        factor *= 1.025
+        upward.append("Estate designation provides modest positioning support.")
     if single:
-        factor *= 1.08
-        drivers.append("Single-vineyard designation adds scarcity/positioning support.")
+        factor *= 1.06
+        upward.append("Single-vineyard designation provides scarcity/positioning support.")
 
     cases = target.get("cases_produced")
     if cases not in (None, "") and not pd.isna(cases):
         cases = float(cases)
         if cases < 300:
-            factor *= 1.12
-            drivers.append("Very limited production supports scarcity pricing.")
+            factor *= 1.09
+            upward.append("Very limited production supports scarcity pricing.")
         elif cases < 750:
-            factor *= 1.08
-            drivers.append("Limited production supports a moderate scarcity premium.")
+            factor *= 1.06
+            upward.append("Limited production supports a moderate scarcity premium.")
         elif cases < 1500:
-            factor *= 1.05
-            drivers.append("Relatively small production supports a modest scarcity premium.")
+            factor *= 1.035
+            upward.append("Relatively small production supports a modest scarcity premium.")
         elif cases > 20000:
-            factor *= 0.92
-            drivers.append("High production volume reduces the scarcity premium.")
+            factor *= 0.93
+            downward.append("High production volume reduces scarcity support.")
         elif cases > 10000:
-            factor *= 0.96
-            drivers.append("Larger production volume modestly reduces scarcity support.")
+            factor *= 0.97
+            downward.append("Larger production volume modestly reduces scarcity support.")
 
-    return factor, drivers
+    return factor, upward, downward
+
+
+def _market_context_factor(context: pd.DataFrame | None, general_category: str) -> Tuple[float, List[str]]:
+    """Use public context lightly; cap the total effect to +/-4%."""
+    if context is None or context.empty:
+        return 1.0, []
+    values = {}
+    for _, r in context.iterrows():
+        try:
+            values[str(r.get("metric", ""))] = float(r.get("value"))
+        except Exception:
+            pass
+    adjustment_pct = 0.0
+    notes: List[str] = []
+
+    cpi = values.get("wine_cpi_yoy_pct")
+    if cpi is not None:
+        cpi_effect = 0.20 * cpi
+        adjustment_pct += cpi_effect
+        notes.append(f"National wine-at-home CPI ({cpi:+.1f}% YoY) contributes a {cpi_effect:+.2f}% light-touch market adjustment.")
+
+    if general_category.casefold() == "red":
+        crush = values.get("ca_red_wine_grape_crush_yoy_pct")
+        if crush is not None:
+            supply_effect = -0.10 * crush
+            adjustment_pct += supply_effect
+            notes.append(f"California red-wine grape crush ({crush:+.1f}% YoY) contributes a {supply_effect:+.2f}% light-touch supply adjustment.")
+
+    adjustment_pct = min(4.0, max(-4.0, adjustment_pct))
+    return 1.0 + adjustment_pct / 100.0, notes
 
 
 def _round_price(v: float) -> float:
     if v < 50:
         return float(round(v))
-    if v < 100:
-        return float(5 * round(v / 5))
     return float(5 * round(v / 5))
 
 
-def _confidence(target: Dict, comps: pd.DataFrame) -> Tuple[str, int, List[str]]:
-    score = 10
-    notes = []
+def _confidence(target: Dict, comps: pd.DataFrame, context: pd.DataFrame | None) -> Tuple[str, int, Dict[str, str], List[str]]:
     n = len(comps)
-    if n >= 10:
-        score += 32
+    notes: List[str] = []
+
+    if n >= 15:
+        coverage_score, coverage_label = 30, "Strong"
+    elif n >= 10:
+        coverage_score, coverage_label = 26, "Strong"
     elif n >= 6:
-        score += 25
+        coverage_score, coverage_label = 20, "Moderate"
     elif n >= 3:
-        score += 16
+        coverage_score, coverage_label = 13, "Limited"
     else:
-        score += 6
-        notes.append("Few comparable observations are currently available.")
+        coverage_score, coverage_label = 6, "Weak"
+        notes.append("Few comparable observations are available.")
 
-    if n:
-        target_region = _clean_text(target.get("region")).casefold()
-        exact_region = (comps["region"].str.casefold() == target_region).mean() if target_region else 0
-        target_graph = _clean_text(target.get("graph_category") or target.get("varietal")).casefold()
-        exact_cat = (comps["graph_category"].str.casefold() == target_graph).mean() if target_graph else 0
-        score += int(15 * exact_region)
-        score += int(15 * exact_cat)
-        if exact_region < .5:
-            notes.append("A meaningful share of comps come from outside the exact target region or lack region data.")
-        if exact_cat < .5:
-            notes.append("The model needed adjacent wine categories to expand the comparable set.")
+    target_graph = _clean_text(target.get("graph_category") or target.get("varietal")).casefold()
+    exact_cat = (comps["graph_category"].str.casefold() == target_graph).mean() if n and target_graph else 0
+    cat_score = int(22 * exact_cat)
+    cat_label = "Strong" if exact_cat >= .75 else "Moderate" if exact_cat >= .45 else "Limited"
 
-    if target.get("previous_msrp") not in (None, ""):
-        score += 10
-    if target.get("critic_score") not in (None, ""):
-        score += 5
-    if target.get("cases_produced") not in (None, ""):
-        score += 5
-    if target.get("product_tier"):
-        score += 4
-    if _bool(target.get("estate")) or _bool(target.get("single_vineyard")):
-        score += 4
+    target_tier = _clean_text(target.get("product_tier") or "Core")
+    exact_tier = (comps["product_tier"] == target_tier).mean() if n else 0
+    tier_score = int(18 * exact_tier)
+    tier_label = "Strong" if exact_tier >= .65 else "Moderate" if exact_tier >= .35 else "Limited"
 
-    score = int(min(96, max(25, score)))
-    label = "High" if score >= 75 else "Moderate" if score >= 55 else "Low"
-    return label, score, notes
+    same_label_n = int((comps["comp_reason"] == "Same label / other vintage").sum()) if n and "comp_reason" in comps else 0
+    history_score = min(12, same_label_n * 5)
+    history_label = "Strong" if same_label_n >= 2 else "Moderate" if same_label_n == 1 else "Limited"
+
+    enrichment_count = 0
+    for field in ["critic_score", "cases_produced", "previous_msrp"]:
+        if target.get(field) not in (None, "") and not pd.isna(target.get(field)):
+            enrichment_count += 1
+    enrichment_score = min(10, enrichment_count * 3 + (2 if _bool(target.get("estate")) or _bool(target.get("single_vineyard")) else 0))
+    enrichment_label = "Strong" if enrichment_score >= 8 else "Moderate" if enrichment_score >= 4 else "Limited"
+
+    context_score = 6 if context is not None and not context.empty else 0
+    context_label = "Available" if context_score else "Not loaded"
+
+    score = min(96, 10 + coverage_score + cat_score + tier_score + history_score + enrichment_score + context_score)
+    label = "High" if score >= 80 else "Moderate" if score >= 58 else "Low"
+    breakdown = {
+        "Comparable coverage": coverage_label,
+        "Category match": cat_label,
+        "Tier match": tier_label,
+        "Same-label history": history_label,
+        "Wine-specific enrichment": enrichment_label,
+        "Public market context": context_label,
+    }
+    if exact_cat < .5:
+        notes.append("The comparable set required a meaningful number of adjacent-category observations.")
+    if exact_tier < .35:
+        notes.append("Product-tier coverage is still thin for this target.")
+    return label, int(score), breakdown, notes
 
 
-def analyze_wine(df: pd.DataFrame, target: Dict) -> Dict:
+def analyze_wine(df: pd.DataFrame, target: Dict, context: pd.DataFrame | None = None) -> Dict:
     comps = select_comps(df, target)
     if comps.empty:
         raise ValueError("No usable comparable wines were found. Add more comp data or broaden the target category.")
@@ -280,10 +365,11 @@ def analyze_wine(df: pd.DataFrame, target: Dict) -> Dict:
     med = weighted_quantile(vals, w, .50)
     q75 = weighted_quantile(vals, w, .75)
     mean = float(np.average(vals, weights=w))
-    market_base = 0.70 * med + 0.30 * mean
+    market_base = 0.74 * med + 0.26 * mean
 
-    attr_factor, drivers = _attribute_factor(target)
-    adjusted = market_base * attr_factor
+    attr_factor, upward, downward = _attribute_factor(target)
+    context_factor, context_notes = _market_context_factor(context, _clean_text(target.get("general_category") or "Red"))
+    adjusted = market_base * attr_factor * context_factor
 
     previous = target.get("previous_msrp")
     previous_vintage = target.get("previous_vintage")
@@ -295,32 +381,30 @@ def analyze_wine(df: pd.DataFrame, target: Dict) -> Dict:
                 years = max(1, int(float(target_vintage) - float(previous_vintage)))
             except Exception:
                 years = 1
-        anchor = float(previous) * (1.025 ** years)
-        adjusted = 0.62 * adjusted + 0.38 * anchor
-        drivers.append("Prior-vintage MSRP is used as a stabilizing brand-history anchor.")
+        anchor = float(previous) * (1.02 ** years)
+        adjusted = 0.66 * adjusted + 0.34 * anchor
+        upward.append("Prior-vintage MSRP is used as a stabilizing brand-history anchor rather than allowing comps alone to reset the label's position.")
 
-    # Scenario range: use both market dispersion and strategic spacing.
-    volume_raw = min(adjusted * 0.88, max(q25 * attr_factor, adjusted * 0.82))
-    premium_raw = max(adjusted * 1.18, min(q75 * attr_factor, adjusted * 1.24))
+    volume_raw = min(adjusted * 0.90, max(q25 * attr_factor * context_factor, adjusted * 0.84))
+    premium_raw = max(adjusted * 1.16, min(q75 * attr_factor * context_factor, adjusted * 1.22))
 
     cogs = target.get("cogs")
     if cogs not in (None, "") and not pd.isna(cogs):
         cogs = float(cogs)
-        # Protect against recommending DTC price below a basic 45% gross margin floor.
         floor = cogs / 0.55 if cogs > 0 else 0
         if volume_raw < floor:
             volume_raw = floor
-            drivers.append("The lower strategy is constrained by the entered COGS to avoid an extremely weak DTC gross margin.")
+            downward.append("The volume-oriented strategy is constrained by entered COGS to avoid an extremely weak DTC gross margin.")
 
     volume = _round_price(volume_raw)
     market = _round_price(max(adjusted, volume + 1))
     premium = _round_price(max(premium_raw, market + (5 if market >= 50 else 3)))
     if volume >= market:
-        volume = _round_price(market * .91)
+        volume = _round_price(market * .92)
     if premium <= market:
         premium = _round_price(market * 1.12)
 
-    label, conf_score, conf_notes = _confidence(target, comps)
+    label, conf_score, conf_breakdown, conf_notes = _confidence(target, comps, context)
 
     channel = _clean_text(target.get("channel") or "DTC").upper()
     dtc_share = float(target.get("dtc_share") or (1.0 if channel == "DTC" else 0.0 if channel == "WHOLESALE" else .60))
@@ -336,29 +420,33 @@ def analyze_wine(df: pd.DataFrame, target: Dict) -> Dict:
         return realized, margin
 
     scenarios = []
-    for name, price, risk in [
-        ("Volume / Lower-Risk", volume, "Lower"),
-        ("Market-Aligned", market, "Moderate"),
-        ("Premium / Higher-Risk", premium, "Higher"),
+    for name, price, positioning in [
+        ("Volume-Oriented", volume, "More accessible positioning / greater sell-through emphasis"),
+        ("Market-Aligned", market, "Central comparable-market position"),
+        ("Premium Positioning", premium, "Higher-end positioning / requires stronger market support"),
     ]:
         realized, margin = economics(price)
         scenarios.append({
             "strategy": name,
             "msrp": price,
-            "demand_risk": risk,
+            "positioning": positioning,
             "estimated_net_revenue_per_bottle": realized,
             "gross_margin_pct": margin,
         })
 
     return {
         "market_base": market_base,
-        "market_range_low": _round_price(q25 * attr_factor),
-        "market_range_high": _round_price(q75 * attr_factor),
+        "market_range_low": _round_price(q25 * attr_factor * context_factor),
+        "market_range_high": _round_price(q75 * attr_factor * context_factor),
         "attribute_factor": attr_factor,
+        "context_factor": context_factor,
+        "context_notes": context_notes,
         "scenarios": scenarios,
         "confidence_label": label,
         "confidence_score": conf_score,
+        "confidence_breakdown": conf_breakdown,
         "confidence_notes": conf_notes,
-        "drivers": drivers,
+        "upward_drivers": upward,
+        "downward_drivers": downward,
         "comps": comps,
     }

@@ -1,50 +1,97 @@
-# Rudder Analytics — Wine Market Intelligence v0.1
+# Rudder Analytics — Wine Market Intelligence v0.2
 
-First working prototype of the standalone Rudder Analytics wine pricing / market-positioning tool.
+This build folds the expanded Paso Robles pricing workbook and the public-data layer into the main Wine Market Intelligence repository. The data layer remains logically separate, but for the MVP it lives inside the same repo under `data/` and the **Data Hub (Admin)** workspace. A separate database service is not required yet.
 
-## What this build does
+## What changed from v0.1
 
-- Loads a starter Paso Robles Cabernet/Bordeaux comp dataset.
-- Includes Eberle as a first validation producer.
-- Lets a user enter or load a wine and add optional critic score, production, tier, estate/single-vineyard status, COGS, channel mix, and prior MSRP.
-- Returns three positions: **Volume / Lower-Risk**, **Market-Aligned**, and **Premium / Higher-Risk**.
-- Shows a comparable-supported range, model confidence, closest comps, price landscape, pricing drivers, and approximate blended per-bottle economics.
-- Accepts additional CSV/XLSX comp data during the Streamlit session.
-- Exports the recommendation to CSV.
+- Replaced the small starter comp set with **122 usable pricing observations**: 120 priced records normalized from `Wine Prices_Paso - 2025-11-15.xlsx`, plus two Eberle public enrichment records retained from v0.1.
+- Coverage now includes Détente, Eberle, Vina Robles, Peachy Canyon, and Austin Hope.
+- Added stronger product-tier matching so Reserve/Flagship wines have less influence on Core-tier recommendations.
+- Added a staged comparable hierarchy: same label / prior vintages → same winery & tier → same category & tier → broader fallback.
+- Added **Historical backtest** mode that excludes later vintages.
+- Added explainable confidence components rather than only one unexplained score.
+- Renamed strategies to **Volume-Oriented / Market-Aligned / Premium Positioning** until winery-specific demand elasticity is available.
+- Added public market context with a small capped effect (±4%).
+- Added an internal **Data Hub (Admin)** page for workbook imports, manual comp additions, downloads, and public-data refresh status.
+- Added government/open-data connectors for BLS, TTB, and USDA/NASS.
+- Added a weekly GitHub Action to refresh public data and commit the refreshed cache back to the repository.
 
-## Important v0.1 limitation
+## Architecture
 
-This is intentionally a market-positioning prototype, not yet a demand forecast. It does **not** estimate cases sold from price until winery-specific sales history is available. Prototype adjustment coefficients should be calibrated as the comp database grows.
-
-## Run locally
-
-```bash
-pip install -r requirements.txt
-streamlit run app.py
+```text
+Rudder workbook + manual researched comps
+                  \
+                   -> data/wine_comps.csv -> pricing engine -> customer result
+                  /
+BLS / TTB / USDA public data
+        -> data/public_context.csv + data/raw/
 ```
 
-## Deploy on Streamlit Community Cloud
+For this stage, keeping the data in the same GitHub repository is simpler than running a second app and database. The split is still clean in code: pricing logic reads normalized data; Data Hub handles ingestion and refreshes.
 
-Upload the contents of this folder to a GitHub repository, create a Streamlit app from the repo, and set the main file to `app.py`. No secrets are required for v0.1.
+Move the shared data layer to Supabase/PostgreSQL when one or more of these become true:
 
-## Starter data
+1. multiple Rudder staff need to edit records concurrently;
+2. customers need persistent uploads/history;
+3. scheduled collectors are writing many records per day;
+4. the comp database grows beyond what is comfortable in versioned CSV files.
 
-`data/seed_wines.csv` contains:
+## Deploy to Streamlit
 
-1. Cabernet Sauvignon and Bordeaux-blend observations extracted from the supplied `Wine Pricing.accdb` database.
-2. Publicly verified Eberle price/product observations used for early validation.
+Upload the contents of this folder to the existing Wine Market Intelligence GitHub repository (or a new v0.2 branch while testing). The repository root should contain:
 
-The app excludes an exact target wine/vintage from its own comparable set to reduce price leakage during backtesting.
+```text
+.streamlit/
+.github/
+assets/
+data/
+scripts/
+tests/
+app.py
+data_loader.py
+pricing_engine.py
+public_data.py
+requirements.txt
+README.md
+SOURCES.md
+```
 
-## Add comps
+Streamlit Community Cloud settings:
 
-Use `data/comp_import_template.csv` as the schema. The Comparable Database page accepts CSV or Excel files for session-only expansion.
+- Branch: `main` (or your test branch)
+- Main file: `app.py`
 
-## Suggested next build
+## Public data refresh
 
-1. Convert the full Access wine table into the normalized schema.
-2. Add persistent PostgreSQL/Supabase storage.
-3. Add scheduled winery-tech-sheet and permitted public-source enrichment.
-4. Add CDFA grape-price and NOAA vintage-weather features.
-5. Expand Paso Cabernet sample size, then add Napa Cabernet.
-6. Add sales-history upload and price-elasticity / gross-profit optimization.
+The Data Hub includes a **Refresh public data now** button. On Streamlit Community Cloud, files written by that button are temporary because the app filesystem is ephemeral.
+
+The persistent path is the included GitHub Actions workflow:
+
+`.github/workflows/refresh-public-data.yml`
+
+It runs weekly and can also be triggered manually from GitHub Actions. It currently:
+
+- refreshes BLS Wine at Home CPI;
+- downloads TTB wine yearly/monthly data;
+- downloads TTB wine producer permits;
+- downloads the official 2025 final California Grape Crush CSV;
+- commits refreshed files back to the repo if they changed.
+
+No retailer/winery scraping is required for these public feeds.
+
+## Public-context model use
+
+v0.2 intentionally limits the public context effect. Public market data should fine-tune a comparable-based estimate, not overpower actual bottle-market comps.
+
+Current active context inputs:
+
+- Wine at Home CPI year-over-year change (BLS)
+- California red-wine grape crush year-over-year change (USDA/NASS snapshot)
+
+The combined adjustment is capped at ±4%.
+
+TTB raw data is collected now for later feature engineering and validation; it does not yet directly alter MSRP. NOAA vintage climate is the next planned connector and will require a free NOAA token plus validated station/AVA mapping.
+
+## Important modeling limitation
+
+The current tool recommends **market position**, not expected case sales. Do not interpret the three price strategies as quantified sell-through probabilities. Winery-specific historical sales/pricing data is required before building a true demand-elasticity forecast.
