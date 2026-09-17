@@ -1,0 +1,4 @@
+metric,value,unit,period,source_name,source_url,captured_date,confidence,model_use
+wine_cpi_yoy_pct,-1.1,percent,2026-08,U.S. Bureau of Labor Statistics,https://www.bls.gov/news.release/cpi.t02.htm,2026-09-17,High,Light-touch national wine price pressure
+ca_red_wine_grape_crush_yoy_pct,-10.8,percent,2025,USDA NASS California Grape Crush Report,https://www.nass.usda.gov/Statistics_by_State/California/Publications/Specialty_and_Other_Releases/Grapes/Crush/Reports/,2026-09-17,High,Light-touch California red-wine supply context
+ca_total_grape_crush_yoy_pct,-6.2,percent,2025,USDA NASS California Grape Crush Report,https://www.nass.usda.gov/Statistics_by_State/California/Publications/Specialty_and_Other_Releases/Grapes/Crush/Reports/,2026-09-17,High,Informational only

@@ -1,0 +1,5 @@
+winery,wine,vintage,known_price,market_tier,volume_oriented,market_aligned,premium_positioning,confidence,confidence_score,comp_count
+Eberle,Vineyard Selection Cabernet Sauvignon,2023,30,Core,31.0,34.0,41.0,Moderate,76,20
+Eberle,Estate Cabernet Sauvignon,2023,60,Estate,55.0,65.0,75.0,High,80,20
+Eberle,Reserve Cabernet Sauvignon,2021,125,Flagship,85.0,105.0,125.0,Moderate,64,20
+Austin Hope,Cabernet Sauvignon,2023,62,Estate,46.0,55.0,65.0,Moderate,72,20
