@@ -1,20 +1,20 @@
-# Rudder Wine Market Intelligence v0.3.10
+# Rudder Wine Market Intelligence v0.3.11 — Single known-wine search
 
-## Known-wine search fix
+This patch streamlines the Pricing Analysis "Start from a known wine" workflow into **one autocomplete field**.
 
-Replace the root-level `app.py` with the included version.
+## Replace these root-level files
 
-The Pricing Analysis known-wine selector now has a normalized search field. Search ignores:
+- `app.py`
+- `requirements.txt`
 
-- accents/diacritics (`Côtes` = `Cotes`)
-- capitalization (`EBERLE` = `Eberle`)
-- hyphens and punctuation (`Cotes-du-Robles` = `Cotes du Robles`)
-- repeated spacing
+## What changed
 
-Examples that now match the same wine include:
+- Removed the separate **Search known wines** + **Known wine** controls.
+- Added one **Known wine** autocomplete that both searches and selects.
+- Search remains normalized for accents, capitalization, punctuation, spaces, and hyphens.
+- Examples such as `cotes du rob blanc` can match `Côtes-du-Rôbles Blanc`.
+- Winery, vintage, and wine terms can be mixed in the same search.
+- Repeated identical visible wine labels are suppressed from the selector.
+- Includes a deployment-safe fallback to Streamlit's built-in selector if the autocomplete component is unavailable.
 
-- `cotes du rob`
-- `Cotes-du-Robles Blanc`
-- `CÔTES DU RÔBLES BLANC`
-
-This patch changes only the Pricing Analysis search UI. The v0.3.9 identity normalization and pricing behavior remain in place.
+After committing both files, let Streamlit rebuild so it installs `streamlit-searchbox`.

@@ -10,6 +10,11 @@ import plotly.express as px
 import streamlit as st
 
 try:
+    from streamlit_searchbox import st_searchbox
+except Exception:
+    st_searchbox = None
+
+try:
     from streamlit_paste_button import paste_image_button
 except Exception:
     paste_image_button = None
@@ -65,7 +70,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.10</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.11</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -99,7 +104,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.10 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category mapping, normalized comp identities, accent-insensitive known-wine search, and reset-safe screenshot intake.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.11 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category mapping, normalized comp identities, a single accent-insensitive known-wine autocomplete, and reset-safe screenshot intake.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -110,39 +115,85 @@ if page == "Pricing Analysis":
         mask = known_df["label"].str.contains("Eberle — 2023 Vineyard Selection Cabernet", case=False, na=False)
         if mask.any():
             default_idx = int(np.flatnonzero(mask.to_numpy())[0])
-        known_search = st.text_input(
-            "Search known wines",
-            value="",
-            placeholder="Type winery or wine — accents, capitalization, spaces, and hyphens are optional",
-            help="Search is normalized, so 'Cotes du Robles Blanc' matches 'Côtes-du-Rôbles Blanc'.",
+        # One autocomplete does both jobs: normalized search + selection.
+        # Preserve the preferred default label before de-duplicating visible options.
+        preferred_default_label = known_df.iloc[default_idx]["label"] if len(known_df) else None
+        # Keep one row per visible winery/vintage/wine label so repeated source observations
+        # do not clutter the selector.
+        known_df = known_df.drop_duplicates(subset=["label"], keep="first").reset_index(drop=True)
+        known_df["_search_key"] = known_df.apply(
+            lambda r: canonical_text_key(
+                f"{r.get('winery', '')} {r.get('vintage', '')} {r.get('wine', '')}"
+            ),
+            axis=1,
+        )
+        labels_all = known_df["label"].tolist()
+        default_label = (
+            preferred_default_label
+            if preferred_default_label in labels_all
+            else (labels_all[0] if labels_all else None)
         )
 
-        display_df = known_df
-        if known_search.strip():
-            query_key = canonical_text_key(known_search)
-            query_tokens = query_key.split()
-            search_keys = known_df.apply(
-                lambda r: canonical_text_key(
-                    f"{r.get('winery', '')} {r.get('vintage', '')} {r.get('wine', '')}"
-                ),
-                axis=1,
-            )
-            match_mask = search_keys.apply(lambda k: all(tok in k for tok in query_tokens))
-            display_df = known_df.loc[match_mask].copy()
+        def _search_known_wines(searchterm: str):
+            query_key = canonical_text_key(searchterm or "")
+            if not query_key:
+                # A short, deterministic initial list keeps the dropdown useful before typing.
+                initial = known_df["label"].tolist()[:25]
+                if default_label and default_label not in initial:
+                    initial = [default_label] + initial[:24]
+                return initial
 
-        if display_df.empty:
-            st.warning("No known wines match that search. Try fewer words or switch off 'Start from a known wine' to enter it manually.")
+            query_tokens = query_key.split()
+            matches = known_df.loc[
+                known_df["_search_key"].apply(lambda k: all(tok in k for tok in query_tokens))
+            ].copy()
+            if matches.empty:
+                return []
+
+            # Prefer matches whose normalized wine/producer text begins with the query,
+            # then shorter labels, while preserving deterministic ordering.
+            matches["_starts"] = matches["_search_key"].str.startswith(query_key).astype(int)
+            matches["_len"] = matches["label"].str.len()
+            matches = matches.sort_values(["_starts", "_len", "label"], ascending=[False, True, True])
+            return matches["label"].tolist()[:30]
+
+        if st_searchbox is not None:
+            selection = st_searchbox(
+                _search_known_wines,
+                label="Known wine",
+                placeholder="Search winery, vintage, or wine…",
+                help="One field searches and selects. Accents, capitalization, spaces, and hyphens are optional — for example, 'Cotes du Robles Blanc' matches 'Côtes-du-Rôbles Blanc'.",
+                key="known_wine_autocomplete",
+                default=default_label,
+                default_searchterm=default_label or "",
+                default_options=_search_known_wines(""),
+                edit_after_submit="option",
+                clear_on_submit=False,
+                debounce=120,
+            )
         else:
-            labels = display_df["label"].tolist()
-            if known_search.strip():
-                select_idx = 0
-            else:
-                default_label = known_df.iloc[default_idx]["label"]
-                select_idx = labels.index(default_label) if default_label in labels else 0
-            selection = st.selectbox("Known wine", labels, index=select_idx)
-            row = display_df.loc[display_df["label"].eq(selection)].iloc[0]
+            # Deployment-safe fallback if the optional autocomplete component is unavailable.
+            # Newer Streamlit versions provide fuzzy filtering inside selectbox, but this
+            # fallback may be less accent-tolerant than the primary component.
+            labels = known_df["label"].tolist()
+            select_idx = labels.index(default_label) if default_label in labels else 0
+            try:
+                selection = st.selectbox(
+                    "Known wine",
+                    labels,
+                    index=select_idx,
+                    placeholder="Search winery, vintage, or wine…",
+                    filter_mode="fuzzy",
+                )
+            except TypeError:
+                selection = st.selectbox("Known wine", labels, index=select_idx)
+
+        if selection:
+            row = known_df.loc[known_df["label"].eq(selection)].iloc[0]
             defaults = row.to_dict()
             st.info("The selected wine's own price is excluded from its comparable analysis. Use Historical backtest mode to also exclude later vintages.")
+        else:
+            st.caption("Type part of a winery, vintage, or wine name and select the matching wine.")
 
     c1, c2, c3, c4 = st.columns(4)
     winery = c1.text_input("Winery / producer", value=str(defaults.get("winery", "")))
