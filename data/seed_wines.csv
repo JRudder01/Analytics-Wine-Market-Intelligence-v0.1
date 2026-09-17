@@ -1,0 +1,18 @@
+winery	wine	vintage	varietal	graph_category	general_category	region	subregion	price	price_type	critic	critic_score	cases_produced	alcohol_pct	estate	single_vineyard	product_tier	source_name	source_url	price_date	data_confidence
+Vina Robles	Suendero	2018	Cabernet Sauvignon, Petit Verdot, Malbec	Bordeaux Blend	Red	Paso Robles		62	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+Vina Robles	Suendero	2019	Cabernet Sauvignon, Petit Verdot, Malbec	Bordeaux Blend	Red	Paso Robles		64	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+Vina Robles	Signature	2019	Cabernet Sauvignon, Petit Verdot, Petite Sirah	Bordeaux Blend	Red	Paso Robles		52	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+Vina Robles	Mountain Road Reserve	2021	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		68	Observed / supplied					TRUE	FALSE	Reserve	Supplied Rudder Access database			Moderate
+Vina Robles	Limited Estate Cabernet Sauvignon	2021	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		40	Observed / supplied					TRUE	FALSE	Limited	Supplied Rudder Access database			Moderate
+Peachy Canyon	Cirque Du Vin	2020	Cabernet Sauvignon, Petit Verdot, Malbec	Bordeaux Blend	Red	Paso Robles		24	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+Peachy Canyon	Cirque Du Vin	2021	Cabernet Sauvignon, Petit Verdot, Malbec, Cab Franc	Bordeaux Blend	Red	Paso Robles		24	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+Peachy Canyon	Para Siempre	2022	Cabernet Sauvignon, Petit Verdot, Malbec, Cab Franc	Bordeaux Blend	Red	Paso Robles		55	Observed / supplied					FALSE	FALSE	Limited	Supplied Rudder Access database			Moderate
+Peachy Canyon	Devine	2022	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		50	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+Peachy Canyon	Devine	2018	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		50	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+tente	Eastern Bloc	2021	Cabernet Sauvignon, Merlot	Bordeaux Blend	Red	Paso Robles		45	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+Eberle	Vineyard Selection Cabernet Sauvignon	2022	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		30	Observed / supplied					FALSE	FALSE	Core	Supplied Rudder Access database			Moderate
+Eberle	Estate Cabernet Sauvignon	2021	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		60	Observed / supplied					TRUE	FALSE	Estate	Supplied Rudder Access database			Moderate
+Eberle	Vineyard Selection Cabernet Sauvignon	2023	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		30	Winery retail	Wine Enthusiast	91		13.9	FALSE	FALSE	Core	Eberle Winery	https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=VBCAB23	9/17/2026	High
+Eberle	Estate Cabernet Sauvignon	2023	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		60	Winery retail				14.5	TRUE	FALSE	Estate	Eberle Winery	https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=CABERNET23	9/17/2026	High
+Eberle	Reserve Cabernet Sauvignon	2021	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		125	Winery retail				14.5	TRUE	FALSE	Flagship	Eberle Winery	https://shop.eberlewinery.com/SHOP.AMS?LEVEL=BOT&PART=CABRES21	9/17/2026	High
+Eberle	Vineyard Selection Cabernet Sauvignon	2024	Cabernet Sauvignon	Cabernet Sauvignon	Red	Paso Robles		32	Winery retail					FALSE	FALSE	Core	Eberle Winery	https://shop.eberlewinery.com/SHOP.AMS?CATCODE=CLUB&LEVEL=MID	9/17/2026	High
