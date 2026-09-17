@@ -65,7 +65,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.4</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.6</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -99,7 +99,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.4 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, and reset-safe screenshot intake.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.6 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic general-category mapping, and reset-safe screenshot intake.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -320,10 +320,16 @@ elif page == "Data Hub (Admin)":
 
     flash_success = st.session_state.pop("vision_flash_success", None)
     flash_info = st.session_state.pop("vision_flash_info", None)
+    github_flash_success = st.session_state.pop("github_flash_success", None)
+    github_flash_info = st.session_state.pop("github_flash_info", None)
     if flash_success:
         st.success(flash_success)
     if flash_info:
         st.info(flash_info)
+    if github_flash_success:
+        st.success(github_flash_success)
+    if github_flash_info:
+        st.info(github_flash_info)
 
     if "vision_pasted_images" not in st.session_state:
         st.session_state.vision_pasted_images = []
@@ -681,16 +687,32 @@ elif page == "Data Hub (Admin)":
                 except Exception as exc:
                     st.error(f"Unexpected GitHub save error: {exc}")
                 else:
+                    # Persist succeeded. Clear the local staging queue immediately so the
+                    # current browser session cannot accidentally re-commit the same batch.
                     st.session_state.uploaded_comps = None
-                    st.session_state.vision_extraction = None
-                    st.success(
+                    _reset_vision_intake()
+                    st.session_state["github_flash_success"] = (
                         f"Saved {save_result['staged_count']} staged observation(s) to "
                         f"{save_result['repo']} on `{save_result['branch']}`. "
-                        f"Database rows: {save_result['remote_before']} → {save_result['remote_after']}."
+                        f"Database rows: {save_result['remote_before']} → {save_result['remote_after']}. "
+                        "Local pending queue cleared."
                     )
                     if save_result.get("commit_url"):
-                        st.link_button("Open GitHub commit", save_result["commit_url"])
-                    st.info("GitHub will trigger the Streamlit redeploy. Wait for the app to reload before starting another batch so the newly committed database is loaded locally.")
+                        st.session_state["github_flash_info"] = (
+                            "The batch is permanently stored in GitHub. The app has cleared the local "
+                            "pending queue; opening the GitHub commit is optional. Wait for the GitHub-triggered "
+                            "Streamlit redeploy before starting a new batch so the committed database is loaded locally."
+                        )
+                    else:
+                        st.session_state["github_flash_info"] = (
+                            "The batch is permanently stored in GitHub and the local pending queue is cleared. "
+                            "Wait for the GitHub-triggered Streamlit redeploy before starting a new batch so the "
+                            "committed database is loaded locally."
+                        )
+                    # Force the metrics/UI to redraw now instead of leaving the pre-commit
+                    # pending count visible until a cloud redeploy or manual browser refresh.
+                    st.cache_data.clear()
+                    st.rerun()
 
     st.divider()
     st.markdown("### Public market context")

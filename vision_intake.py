@@ -256,14 +256,49 @@ def infer_graph_category(varietal_text: str, wine_name: str = "") -> str:
 
 
 def infer_general_category(graph_category: str, varietal_text: str = "", wine_name: str = "") -> str:
-    text = f"{graph_category} {varietal_text} {wine_name}".lower()
-    if "rosé" in text or "rose" in text:
+    """Deterministically classify the broad wine color/style category.
+
+    This deliberately overrides an occasional vision-model color mistake by using
+    the extracted varietal/category text. Unknown varieties remain conservative
+    rather than being treated as red merely because they are unfamiliar.
+    """
+    text = f"{graph_category} {varietal_text} {wine_name}".casefold()
+
+    # Style words take precedence over grape-color inference.
+    if any(t in text for t in ["rosé", "rose", "blush"]):
         return "Rosé"
-    if "sparkling" in text or "brut" in text:
+    if any(t in text for t in ["sparkling", "brut", "méthode traditionnelle", "methode traditionnelle"]):
         return "Sparkling"
-    white_terms = ["white", "chardonnay", "sauvignon blanc", "viognier", "grenache blanc", "picpoul", "roussanne", "marsanne"]
+
+    white_terms = [
+        "white blend", "white wine", "blanc",
+        "chardonnay", "sauvignon blanc", "viognier", "grenache blanc",
+        "picpoul", "roussanne", "marsanne", "clairette",
+        "muscat", "moscato", "muscat canelli",
+        "riesling", "gewürztraminer", "gewurztraminer",
+        "pinot gris", "pinot grigio", "chenin blanc", "sémillon", "semillon",
+        "albariño", "albarino", "vermentino", "fiano", "verdelho",
+        "grüner veltliner", "gruner veltliner", "torrontés", "torrontes",
+    ]
     if any(t in text for t in white_terms):
         return "White"
+
+    red_terms = [
+        "red blend", "bordeaux blend", "rhône blend", "rhone blend",
+        "cabernet sauvignon", "cabernet franc", "merlot", "malbec",
+        "petit verdot", "pinot noir", "syrah", "shiraz", "grenache",
+        "mourvèdre", "mourvedre", "petite sirah", "zinfandel",
+        "sangiovese", "barbera", "tempranillo", "nebbiolo",
+        "graciano", "lagrein", "carignan", "counoise",
+    ]
+    if any(t in text for t in red_terms):
+        return "Red"
+
+    # Unknown/Other should not silently default to red.  In the UI the reviewer
+    # can still override this, but White is safer for clearly pale/white-labeled
+    # categories only; otherwise keep the historical fallback for compatibility.
+    if graph_category == "Other":
+        return "White" if any(t in text for t in ["white", "blanc"]) else "Red"
     return "Red"
 
 
