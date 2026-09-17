@@ -1,8 +1,12 @@
-# Rudder Wine Market Intelligence v0.3.7 patch
+# Rudder Wine Market Intelligence v0.3.8 — Estate reliability patch
 
-Replace only the repository-root `vision_intake.py`.
+Replace only the root-level `vision_intake.py` file in GitHub.
 
-Changes:
-- Stronger Estate detection for whole-wine phrases such as “crafted from Estate Chardonnay”, while keeping component-only estate mentions false.
-- Direct winery producer/source names are canonicalized for consistency (for example `Eberle Winery` -> `Eberle`, `JUSTIN Vineyards & Winery` -> `JUSTIN`).
-- Product tier remains independent: a Reserve made from estate fruit stays `Reserve` with `estate = TRUE`.
+This patch:
+- adds an explicit whole-wine Estate decision to the structured vision extraction;
+- treats wording such as “crafted from sustainably grown Estate Chardonnay” as Estate = TRUE;
+- keeps component-only estate wording from triggering Estate status;
+- falls back to the visible source/brand name when the model leaves the winery field blank;
+- keeps canonical direct-winery source names (for example, Eberle Winery -> Eberle).
+
+No changes are required to `app.py`, `github_storage.py`, the database, requirements, or Streamlit secrets.

@@ -48,6 +48,10 @@ EXTRACTION_SCHEMA = {
             "items": {"type": "string"},
         },
         "estate_evidence": {"type": ["string", "null"]},
+        "finished_wine_estate": {
+            "type": "string",
+            "enum": ["Yes", "No", "Unknown"],
+        },
         "single_vineyard_evidence": {"type": ["string", "null"]},
         "tier_evidence": {"type": ["string", "null"]},
         "source_name_visible": {"type": ["string", "null"]},
@@ -64,7 +68,7 @@ EXTRACTION_SCHEMA = {
         "winery", "wine", "vintage", "varietal_text", "appellation", "subregion",
         "retail_price", "club_price", "explicit_price_label", "alcohol_pct",
         "cases_produced", "critic_name", "critic_score", "competition_awards",
-        "vineyard_sources", "estate_evidence", "single_vineyard_evidence",
+        "vineyard_sources", "estate_evidence", "finished_wine_estate", "single_vineyard_evidence",
         "tier_evidence", "source_name_visible", "overall_confidence", "warnings",
     ],
 }
@@ -80,8 +84,10 @@ Rules:
 - critic_name/critic_score are for named editorial wine critics/publications. Do NOT put wine-competition scores there. Put competition medals/scores in competition_awards.
 - vineyard_sources should contain named vineyard/source locations explicitly stated for the finished wine or its components.
 - estate_evidence is ONLY for evidence that the FINISHED WINE is estate-designated or that all fruit for the finished wine is explicitly estate-grown/estate-sourced. Positive examples include a wine title containing Estate; '100% estate-grown fruit'; 'crafted/made/produced from Estate Chardonnay'; 'made entirely from estate fruit'; or an explicit statement that the finished wine comes from the producer's estate vineyard(s). Do NOT treat a component vineyard/source such as 'Picpoul is from Eberle Estate', a winery name containing Estate, or a bare named 'Estate Vineyard' by itself as proof that the finished wine is Estate. In those cases use null unless the wording clearly applies to the whole wine.
+- finished_wine_estate is a separate decision field. Use Yes only when the page clearly applies Estate/estate-grown/estate-sourced status to the WHOLE finished wine. Example: 'Crafted from sustainably grown Estate Chardonnay' = Yes. Use No only when the page clearly shows the finished wine is not estate or is mixed-source. Otherwise use Unknown. This field must not be inferred from a winery name containing Estate or from one blend component coming from an estate vineyard.
 - single_vineyard_evidence should contain visible wording that clearly ties the finished wine to one named vineyard. If multiple vineyard sources are shown, note that in warnings and use null unless the page explicitly calls the finished wine single-vineyard.
 - tier_evidence should contain visible words that describe the FINISHED WINE's market tier, such as Flagship, Reserve, Estate, Limited Release, Cellar Club, icon, benchmark, etc. Do not use "Estate" from a component vineyard/source as tier evidence. Otherwise null.
+- winery should be the producer/brand visibly shown on the page or bottle label when readable (for example, Eberle Winery). source_name_visible should capture the visible source/brand name as a backup.
 - Keep names faithful to the page. Do not rewrite branding.
 - A screenshot can contain several sections of one product page; combine them into one product record.
 - If screenshots appear to show more than one different wine, lower confidence and warn the reviewer.
@@ -416,7 +422,9 @@ def build_comp_record(
     source_name_override: str = "",
 ) -> dict[str, Any]:
     raw_winery = _text(extraction.get("winery"))
-    winery = normalize_direct_winery_name(raw_winery) if source_kind == "Official winery site" else raw_winery
+    visible_source = _text(extraction.get("source_name_visible"))
+    producer_candidate = raw_winery or visible_source
+    winery = normalize_direct_winery_name(producer_candidate) if source_kind == "Official winery site" else producer_candidate
     wine = _text(extraction.get("wine"))
     varietal = _text(extraction.get("varietal_text"))
     graph = infer_graph_category(varietal, wine)
@@ -431,6 +439,15 @@ def build_comp_record(
         source_name = winery or normalize_direct_winery_name(extraction.get("source_name_visible"))
     else:
         source_name = _text(extraction.get("source_name_visible")) or source_kind
+
+    estate_evidence = " ".join(
+        part for part in [
+            _text(extraction.get("estate_evidence")),
+            _text(extraction.get("tier_evidence")),
+        ] if part
+    )
+    explicit_estate = _text(extraction.get("finished_wine_estate")).casefold() == "yes"
+    estate_value = explicit_estate or infer_estate(wine, estate_evidence)
 
     return {
         "winery": winery,
@@ -447,9 +464,9 @@ def build_comp_record(
         "critic_score": extraction.get("critic_score"),
         "cases_produced": extraction.get("cases_produced"),
         "alcohol_pct": extraction.get("alcohol_pct"),
-        "estate": infer_estate(wine, extraction.get("estate_evidence")),
+        "estate": estate_value,
         "single_vineyard": infer_single_vineyard(extraction),
-        "product_tier": infer_product_tier(wine, extraction.get("tier_evidence"), extraction.get("estate_evidence")),
+        "product_tier": infer_product_tier(wine, extraction.get("tier_evidence"), estate_evidence),
         "source_name": source_name,
         "source_url": source_url.strip(),
         "price_date": date.today().isoformat(),
