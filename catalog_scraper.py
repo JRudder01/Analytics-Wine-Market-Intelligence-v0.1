@@ -22,9 +22,11 @@ USER_AGENT = (
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
+PAGE_CACHE_TTL_SECONDS = 24 * 60 * 60
 MAX_REDIRECTS = 3
 
 _ROBOTS_CACHE: dict[str, tuple[float, RobotFileParser | None, str]] = {}
+_PAGE_CACHE: dict[str, tuple[float, str, str, str, str]] = {}  # ts, html, content_type, etag, last_modified
 
 PRICE_RE = re.compile(
     r"(?:(retail|msrp|regular|list|sale|club|member|membership|wine\s+society)\s*(?:price)?\s*[:\-]?\s*)?"
@@ -48,6 +50,7 @@ class CatalogFetch:
     html: str
     bytes_read: int
     robots_status: str
+    request_note: str = "network fetch"
     user_agent: str = USER_AGENT
 
 
@@ -63,6 +66,17 @@ class WineOffer:
     evidence: str
     extraction_method: str
     confidence: str
+    varietal: str = ""
+    graph_category: str = ""
+    general_category: str = ""
+    region: str = ""
+    subregion: str = ""
+    alcohol_pct: float | None = None
+    cases_produced: int | None = None
+    estate: bool = False
+    single_vineyard: bool = False
+    product_tier: str = "Core"
+    availability_status: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -215,24 +229,51 @@ def _read_response(response: requests.Response) -> tuple[str, int, str]:
 
 
 def fetch_catalog_page(url: str) -> CatalogFetch:
-    """Fetch only the exact user-entered page (plus robots.txt if not cached).
+    """Fetch only the exact requested page (plus robots.txt if not cached).
 
-    This function does not crawl links, execute JavaScript, load images/CSS, retry
-    403/429 responses, or bypass access controls.
+    The process keeps a conservative in-memory 24-hour page cache. Repeated scans
+    of the exact same URL during the same app process can reuse cached HTML with
+    zero additional page request. If a cached page is stale and the server supplied
+    ETag/Last-Modified, the next request is conditional so an unchanged page can
+    return HTTP 304 without retransmitting the full HTML.
     """
     requested = validate_public_url(url)
     robots, robots_status = _get_robots(requested)
     if robots is not None and not robots.can_fetch(USER_AGENT, requested):
         raise CatalogScanError("robots.txt disallows this page for the configured research user agent.")
 
+    now = time.time()
+    cache_key = requested.casefold()
+    cached = _PAGE_CACHE.get(cache_key)
+    if cached and now - cached[0] < PAGE_CACHE_TTL_SECONDS:
+        _, html, content_type, _, _ = cached
+        return CatalogFetch(
+            requested_url=requested,
+            final_url=requested,
+            status_code=200,
+            content_type=content_type,
+            html=html,
+            bytes_read=len(html.encode("utf-8", errors="ignore")),
+            robots_status=robots_status,
+            request_note="24-hour page cache hit (no page request)",
+        )
+
     current = requested
     original_site = _site_key(requested)
     for redirect_number in range(MAX_REDIRECTS + 1):
         validate_public_url(current)
+        headers = _request_headers()
+        if cached and current.casefold() == requested.casefold():
+            etag = cached[3]
+            last_modified = cached[4]
+            if etag:
+                headers["If-None-Match"] = etag
+            if last_modified:
+                headers["If-Modified-Since"] = last_modified
         try:
             response = requests.get(
                 current,
-                headers=_request_headers(),
+                headers=headers,
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=False,
                 stream=True,
@@ -253,6 +294,20 @@ def fetch_catalog_page(url: str) -> CatalogFetch:
             current = redirected
             continue
 
+        if response.status_code == 304 and cached:
+            _, html, content_type, etag, last_modified = cached
+            _PAGE_CACHE[cache_key] = (now, html, content_type, etag, last_modified)
+            return CatalogFetch(
+                requested_url=requested,
+                final_url=current,
+                status_code=304,
+                content_type=content_type,
+                html=html,
+                bytes_read=0,
+                robots_status=robots_status,
+                request_note="conditional request: not modified (cached HTML reused)",
+            )
+
         if response.status_code in {401, 403}:
             raise CatalogScanError(
                 f"The site returned HTTP {response.status_code}; the collector will not bypass it."
@@ -263,6 +318,9 @@ def fetch_catalog_page(url: str) -> CatalogFetch:
             raise CatalogScanError(f"The catalog page returned HTTP {response.status_code}.")
 
         html, bytes_read, content_type = _read_response(response)
+        etag = response.headers.get("ETag") or ""
+        last_modified = response.headers.get("Last-Modified") or ""
+        _PAGE_CACHE[cache_key] = (now, html, content_type, etag, last_modified)
         return CatalogFetch(
             requested_url=requested,
             final_url=current,
@@ -271,10 +329,10 @@ def fetch_catalog_page(url: str) -> CatalogFetch:
             html=html,
             bytes_read=bytes_read,
             robots_status=robots_status,
+            request_note="network fetch",
         )
 
     raise CatalogScanError("The catalog page could not be fetched.")
-
 
 def _iter_json_nodes(value: Any) -> Iterable[dict[str, Any]]:
     if isinstance(value, dict):
@@ -611,12 +669,219 @@ def discover_product_links(html: str, base_url: str) -> list[ProductLink]:
     return sorted(found.values(), key=lambda item: _ascii_key(item.label))
 
 
+
+
+def _first_match(patterns: list[str], text: str, flags: int = re.I) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags)
+        if match:
+            return _clean_name(match.group(1))
+    return ""
+
+
+def _extract_region(text: str) -> tuple[str, str]:
+    """Extract an appellation conservatively from visible product-page text."""
+    patterns = [
+        r"(?:appellation|ava|region)\s*[:\-]?\s*([A-Z][A-Za-zÀ-ÿ0-9'&.\- ]{2,60}?)(?=\s{2,}|\s(?:technical|alcohol|harvest|cases|vineyard|$))",
+        r"\b([A-Z][A-Za-zÀ-ÿ'&.\- ]{2,50}\sAVA)\b",
+    ]
+    found = _first_match(patterns, text)
+    if found:
+        found = re.sub(r"\s+AVA$", "", found, flags=re.I).strip()
+        return found, ""
+
+    known = [
+        "Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast",
+        "Russian River Valley", "Carneros", "Oak Knoll District", "Howell Mountain",
+        "Atlas Peak", "Mount Veeder", "Stags Leap District", "Rutherford", "Oakville",
+        "Yountville", "Calistoga", "St. Helena", "Adelaida District", "Willow Creek District",
+        "Templeton Gap District", "Santa Margarita Ranch", "York Mountain",
+    ]
+    hits = [name for name in known if re.search(rf"\b{re.escape(name)}\b", text, re.I)]
+    if not hits:
+        return "", ""
+    # Broad region first, narrower district as subregion when both are present.
+    broad = next((x for x in hits if x in {"Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast", "Carneros", "Russian River Valley"}), hits[0])
+    sub = next((x for x in hits if x != broad), "")
+    return broad, sub
+
+
+def _extract_abv(text: str) -> float | None:
+    patterns = [
+        r"(?:alcohol|abv)\s*[:\-]?\s*([0-9]{1,2}(?:\.[0-9])?)\s*%?",
+        r"([0-9]{1,2}(?:\.[0-9])?)\s*%\s*(?:alcohol|abv)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            try:
+                value = float(m.group(1))
+                if 5 <= value <= 25:
+                    return value
+            except ValueError:
+                pass
+    return None
+
+
+def _extract_cases(text: str) -> int | None:
+    patterns = [
+        r"cases?\s+produced\s*[:\-]?\s*([0-9][0-9,]*)",
+        r"production\s*[:\-]?\s*([0-9][0-9,]*)\s*cases?",
+        r"([0-9][0-9,]*)\s*cases?\s+(?:produced|made)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            try:
+                value = int(m.group(1).replace(",", ""))
+                if 0 < value < 5_000_000:
+                    return value
+            except ValueError:
+                pass
+    return None
+
+
+def _extract_varietal(title: str, text: str) -> str:
+    grape_names = [
+        "Cabernet Sauvignon", "Cabernet Franc", "Chardonnay", "Pinot Noir", "Merlot",
+        "Sauvignon Blanc", "Syrah", "Grenache", "Mourvèdre", "Mourvedre", "Zinfandel",
+        "Petite Sirah", "Viognier", "Riesling", "Barbera", "Sangiovese", "Tempranillo",
+        "Vermentino", "Albariño", "Albarino", "Grenache Blanc", "Picpoul Blanc",
+        "Roussanne", "Marsanne", "Muscat Canelli", "Malbec", "Petit Verdot",
+    ]
+
+    # Prefer explicit percentage blends when visible.
+    pct_pattern = re.compile(
+        r"((?:\d{1,3}%\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'\- ]{2,35})(?:\s*(?:,|/|\+|and)\s*\d{1,3}%\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'\- ]{2,35}){0,8})",
+        re.I,
+    )
+    matches = pct_pattern.findall(text)
+    if matches:
+        candidate = max(matches, key=len)
+        candidate = re.sub(r"\s+", " ", candidate).strip(" ,;.-")
+        if (
+            not any(word in candidate.casefold() for word in ["oak", "barrel", "french", "neutral"])
+            and any(g.casefold() in candidate.casefold() for g in grape_names)
+        ):
+            return candidate
+
+    explicit = _first_match([
+        r"(?:varietal|variety|composition)\s*[:\-]?\s*([^.;]{3,180})",
+        r"(?:made from|composed of)\s+([^.;]{3,180})",
+    ], text)
+    if explicit and any(g.casefold() in explicit.casefold() for g in grape_names):
+        return explicit
+
+    title_hits = [g for g in grape_names if re.search(rf"\b{re.escape(g)}\b", title, re.I)]
+    if title_hits:
+        return title_hits[0]
+    return ""
+
+def _infer_graph_category(varietal: str, title: str, text: str) -> str:
+    blob = f"{varietal} {title} {text[:1200]}".casefold()
+    if any(k in blob for k in ["rosé", "rose"]):
+        return "Rosé"
+    if any(k in blob for k in ["sparkling", "brut", "méthode traditionnelle", "methode traditionnelle"]):
+        return "Sparkling"
+    bordeaux = ["cabernet sauvignon", "cabernet franc", "merlot", "malbec", "petit verdot"]
+    rhone_red = ["grenache", "syrah", "mourv", "counoise"]
+    rhone_white = ["grenache blanc", "roussanne", "marsanne", "picpoul", "viognier", "clairette"]
+    if sum(term in varietal.casefold() for term in bordeaux) >= 2:
+        return "Bordeaux Blend"
+    if sum(term in varietal.casefold() for term in rhone_white) >= 2:
+        return "White Blend"
+    if sum(term in varietal.casefold() for term in rhone_red) >= 2:
+        return "Rhône Blend"
+    if "white blend" in blob or "blanc" in title.casefold():
+        return "White Blend"
+    if "red blend" in blob or "proprietary red" in blob:
+        return "Red Blend"
+    singles = [
+        "Cabernet Sauvignon", "Cabernet Franc", "Chardonnay", "Pinot Noir", "Merlot",
+        "Sauvignon Blanc", "Syrah", "Grenache", "Zinfandel", "Petite Sirah", "Viognier",
+        "Riesling", "Barbera", "Sangiovese", "Tempranillo", "Vermentino", "Muscat Canelli",
+    ]
+    for grape in singles:
+        if grape.casefold() in blob:
+            return grape
+    return "Other"
+
+
+def _infer_general_category(graph: str, varietal: str, title: str) -> str:
+    blob = f"{graph} {varietal} {title}".casefold()
+    if any(k in blob for k in ["rosé", "rose"]):
+        return "Rosé"
+    if any(k in blob for k in ["sparkling", "brut"]):
+        return "Sparkling"
+    whites = [
+        "white blend", "blanc", "chardonnay", "sauvignon blanc", "viognier", "grenache blanc",
+        "picpoul", "roussanne", "marsanne", "riesling", "vermentino", "albariño", "albarino",
+        "muscat", "pinot gris", "chenin blanc", "semillon", "sémillon",
+    ]
+    return "White" if any(k in blob for k in whites) else "Red"
+
+
+def _infer_tier(title: str, text: str, estate: bool, cases: int | None) -> str:
+    blob = f"{title} {text[:1600]}".casefold()
+    if any(k in blob for k in ["flagship", "icon wine", "iconic", "benchmark"]):
+        return "Flagship"
+    if "reserve" in blob:
+        return "Reserve"
+    if estate:
+        return "Estate"
+    if any(k in blob for k in ["limited release", "limited-release", "small production", "small-production", "member exclusive", "allocation only"]):
+        return "Limited"
+    if cases is not None and cases <= 250:
+        return "Limited"
+    return "Core"
+
+
+def _availability_status(text: str) -> str:
+    blob = text.casefold()
+    if any(k in blob for k in ["sold out", "out of stock"]):
+        return "Sold out"
+    if any(k in blob for k in ["member exclusive", "members only", "member-only"]):
+        return "Member exclusive"
+    if any(k in blob for k in ["waitlist", "join waitlist"]):
+        return "Waitlist"
+    if any(k in blob for k in ["add to cart", "buy", "purchase", "in stock"]):
+        return "Available"
+    return ""
+
+
+def _extract_product_metadata(title: str, page_text: str) -> dict[str, Any]:
+    varietal = _extract_varietal(title, page_text)
+    graph = _infer_graph_category(varietal, title, page_text)
+    general = _infer_general_category(graph, varietal, title)
+    region, subregion = _extract_region(page_text)
+    alcohol = _extract_abv(page_text)
+    cases = _extract_cases(page_text)
+    blob = f"{title} {page_text[:2500]}".casefold()
+    estate = bool(
+        re.search(r"\bestate\b", title, re.I)
+        or re.search(r"\b(?:100%\s+)?estate[- ]grown\b", page_text, re.I)
+        or re.search(r"\bestate[- ]bottled\b", page_text, re.I)
+        or re.search(r"\b(?:crafted|made|produced) from[^.]{0,100}\bestate\b", page_text, re.I)
+    )
+    single = bool(re.search(r"\bsingle[- ]vineyard\b", page_text, re.I))
+    tier = _infer_tier(title, page_text, estate, cases)
+    return {
+        "varietal": varietal,
+        "graph_category": graph,
+        "general_category": general,
+        "region": region,
+        "subregion": subregion,
+        "alcohol_pct": alcohol,
+        "cases_produced": cases,
+        "estate": estate,
+        "single_vineyard": single,
+        "product_tier": tier,
+        "availability_status": _availability_status(page_text),
+    }
+
 def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
-    """Extract an offer from one explicitly selected product page."""
+    """Extract price plus conservative product metadata from one selected page."""
     soup = BeautifulSoup(html, "html.parser")
-    structured = _extract_jsonld(soup, base_url)
-    if structured:
-        return _dedupe(structured)
 
     title = ""
     heading = soup.find("h1")
@@ -628,41 +893,56 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
             title = _clean_name(og.get("content"))
     if not title and soup.title:
         title = _clean_name(soup.title.get_text(" ", strip=True))
+
+    # Build visible text once, excluding script/style noise.
+    soup_for_text = BeautifulSoup(html, "html.parser")
+    for tag in soup_for_text(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+    page_text = re.sub(r"\s+", " ", soup_for_text.get_text(" ", strip=True))
+    metadata = _extract_product_metadata(title, page_text)
+
+    structured = _extract_jsonld(soup, base_url)
+    if structured:
+        for offer in structured:
+            if not offer.vintage:
+                offer.vintage = _vintage_from_name(offer.wine) or _vintage_from_name(page_text[:900])
+            for field, value in metadata.items():
+                setattr(offer, field, value)
+            # Prefer the visible h1/OG title when JSON-LD is generic.
+            if title and (_ascii_key(offer.wine) in {"wine", "product", "shop"} or len(offer.wine) < 4):
+                offer.wine = title
+        return _dedupe(structured)
+
     if not title:
         return []
 
-    # Remove navigation/script/style text before price classification.
-    for tag in soup(["script", "style", "noscript", "svg"]):
-        tag.decompose()
-    page_text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
     regular, sale, club = _classify_prices(page_text)
     if regular is None and sale is None and club is None:
         return []
 
-    # Evidence remains deliberately short and review-oriented.
     price_match = PRICE_RE.search(page_text)
     if price_match:
         start = max(0, price_match.start() - 180)
-        end = min(len(page_text), price_match.end() + 240)
+        end = min(len(page_text), price_match.end() + 320)
         evidence = page_text[start:end]
     else:
-        evidence = page_text[:420]
+        evidence = page_text[:500]
 
     return [
         WineOffer(
             wine=title,
-            vintage=_vintage_from_name(title) or _vintage_from_name(page_text[:600]),
+            vintage=_vintage_from_name(title) or _vintage_from_name(page_text[:900]),
             regular_price=regular,
             sale_price=sale,
             club_price=club,
             currency="USD",
             product_url=base_url,
-            evidence=evidence[:420],
+            evidence=evidence[:500],
             extraction_method="Selected product page",
             confidence="High" if regular is not None else "Moderate",
+            **metadata,
         )
     ]
-
 
 def merge_offers(offers: list[WineOffer]) -> list[WineOffer]:
     return _dedupe(offers)
@@ -726,9 +1006,14 @@ def _dedupe(offers: list[WineOffer]) -> list[WineOffer]:
             preferred, other = offer, current
         else:
             preferred, other = current, offer
-        for field in ("regular_price", "sale_price", "club_price"):
+        for field in ("regular_price", "sale_price", "club_price", "alcohol_pct", "cases_produced"):
             if getattr(preferred, field) is None and getattr(other, field) is not None:
                 setattr(preferred, field, getattr(other, field))
+        for field in ("varietal", "graph_category", "general_category", "region", "subregion", "product_tier", "availability_status"):
+            if not getattr(preferred, field, "") and getattr(other, field, ""):
+                setattr(preferred, field, getattr(other, field))
+        preferred.estate = bool(preferred.estate or other.estate)
+        preferred.single_vineyard = bool(preferred.single_vineyard or other.single_vineyard)
         if not preferred.vintage and other.vintage:
             preferred.vintage = other.vintage
         by_key[key] = preferred
@@ -741,9 +1026,14 @@ def _dedupe(offers: list[WineOffer]) -> list[WineOffer]:
         if current is None:
             final[key] = offer
             continue
-        for field in ("regular_price", "sale_price", "club_price"):
+        for field in ("regular_price", "sale_price", "club_price", "alcohol_pct", "cases_produced"):
             if getattr(current, field) is None and getattr(offer, field) is not None:
                 setattr(current, field, getattr(offer, field))
+        for field in ("varietal", "graph_category", "general_category", "region", "subregion", "product_tier", "availability_status"):
+            if not getattr(current, field, "") and getattr(offer, field, ""):
+                setattr(current, field, getattr(offer, field))
+        current.estate = bool(current.estate or offer.estate)
+        current.single_vineyard = bool(current.single_vineyard or offer.single_vineyard)
         if current.extraction_method != "JSON-LD" and offer.extraction_method == "JSON-LD":
             current.extraction_method = "JSON-LD + HTML"
             current.confidence = "High"
@@ -779,30 +1069,31 @@ def offers_to_rudder_rows(offers: list[WineOffer], winery: str = "") -> list[dic
         if offer.regular_price is not None:
             price_type = "Winery retail"
         elif offer.sale_price is not None:
-            price_type = "Promotion / sale"
+            price_type = "Observed retail"
         else:
-            price_type = "Club / member"
+            price_type = "Wine club/member price"
         rows.append({
             "winery": winery,
             "wine": offer.wine,
             "vintage": offer.vintage,
-            "varietal": "",
-            "graph_category": "",
-            "general_category": "",
-            "region": "",
-            "subregion": "",
+            "varietal": offer.varietal,
+            "graph_category": offer.graph_category,
+            "general_category": offer.general_category,
+            "region": offer.region,
+            "subregion": offer.subregion,
             "price": selected_price,
             "price_type": price_type,
             "critic": "",
             "critic_score": "",
-            "cases_produced": "",
-            "alcohol_pct": "",
-            "estate": False,
-            "single_vineyard": False,
-            "product_tier": "",
+            "cases_produced": offer.cases_produced if offer.cases_produced is not None else "",
+            "alcohol_pct": offer.alcohol_pct if offer.alcohol_pct is not None else "",
+            "estate": offer.estate,
+            "single_vineyard": offer.single_vineyard,
+            "product_tier": offer.product_tier or "Core",
             "source_name": winery,
             "source_url": offer.product_url,
             "price_date": today,
             "data_confidence": offer.confidence,
         })
     return rows
+

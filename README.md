@@ -1,7 +1,9 @@
-# Wine Market Intelligence v0.3.15
+# Wine Market Intelligence v0.3.16
 
-Experimental selected-product-page catalog scan.
+Catalog enrichment + review/staging update.
 
-The catalog scan remains user-initiated and low-request. A catalog page is fetched once, likely same-site wine product links are discovered from that already-downloaded HTML, and individual product pages are fetched only after the administrator explicitly selects them.
+This version keeps the existing user-initiated, selected-product-page scan but makes the product-page stage substantially more useful. Selected pages can now provide conservative metadata such as varietal/blend, market/general category, AVA/sub-AVA, ABV, cases produced, Estate/single-vineyard signals, product tier, availability status, and retail/sale/member pricing when those facts are present in the static page HTML or JSON-LD.
 
-This patch does not add browser automation, JavaScript execution, CAPTCHA/access-control bypass, automatic retries, or automatic database writes.
+Nothing from the catalog scanner is written directly to the permanent database. The administrator reviews/edits rows, selects which ones to stage, then uses the existing **Commit pending changes to GitHub database** control.
+
+The request design remains intentionally low-impact: no site-wide crawl, no JavaScript/browser automation, no CAPTCHA/access-control bypass, no automatic retry on rate limits, and no automatic loading of images/CSS/fonts/scripts.

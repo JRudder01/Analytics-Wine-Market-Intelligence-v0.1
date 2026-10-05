@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import io
+import re
 
 import numpy as np
 import pandas as pd
@@ -80,7 +81,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.15</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.16</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -114,7 +115,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.15 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.16 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -393,7 +394,7 @@ if page == "Pricing Analysis":
         st.download_button(
             "Download recommendation CSV",
             export_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"rudder_wine_pricing_{winery}_{vintage}.csv".replace(" ", "_"),
+            file_name=f"wine_market_intelligence_pricing_{winery}_{vintage}.csv".replace(" ", "_"),
             mime="text/csv",
         )
 
@@ -409,26 +410,27 @@ elif page == "Data Hub (Admin)":
 
     st.markdown("### Winery Catalog Scan (Experimental)")
     st.caption(
-        "Paste one public winery shop/catalog page for a user-initiated, low-request scan of wine names and prices. "
-        "If the catalog page exposes individual product links, the tool can list them without opening them; only pages you explicitly select are fetched. "
-        "Review the source's terms/permission before wider use."
+        "Paste one public winery shop/catalog page for a user-initiated, low-request scan. "
+        "The catalog page is used to discover product links; individual product pages are fetched only after you explicitly select them. "
+        "Selected product pages now extract price plus conservative wine metadata for human review before staging."
     )
     with st.expander("Catalog scan behavior / safeguards"):
         st.markdown(
             f"""
 - **User-Agent:** `{CATALOG_USER_AGENT}`
 - **Initial scope:** only the exact catalog/shop page you paste is fetched
-- **Product links:** discovered from the already-fetched catalog HTML; they are **not opened automatically**
-- **Optional follow-up:** individual product pages are fetched only after you check them and click **Scan selected product pages**
-- **Request pacing:** selected product pages are fetched sequentially with a short delay; maximum 12 pages per batch
-- **robots.txt:** checked before pages are fetched; the result is cached in-process for 24 hours
-- **Access controls / rate limits:** HTTP 401, 403, or 429 stops that request; there is no bypass or automatic retry
-- **Page size:** maximum 2 MB per fetched HTML page
+- **Product links:** discovered from already-fetched catalog HTML; they are **not opened automatically**
+- **Selected pages only:** product pages are fetched only after you check them and click **Scan selected product pages**
+- **Request pacing:** selected pages are fetched sequentially with a short delay; maximum 12 pages per batch
+- **robots.txt:** checked before fetching; the result is cached in-process for 24 hours
+- **Page cache:** repeated scans of the same URL can reuse a 24-hour in-process HTML cache; stale cached pages use ETag/Last-Modified conditional requests when the site provides them
+- **Access controls / rate limits:** HTTP 401, 403, or 429 is not bypassed and is not automatically retried
+- **Page size:** maximum 2 MB of HTML per fetched page
 - **JavaScript:** not executed
 - **Assets:** images, CSS, fonts, and scripts are not separately downloaded
-- **Database:** scan results are review-only and are **not automatically added** to the wine-comp database
+- **Database:** nothing is written permanently until you review the extracted rows, stage them, and use the normal GitHub batch commit
 
-A first scan of a domain may make two requests: `robots.txt` and the exact catalog page. Once the robots result is cached, each product page you explicitly select normally adds one HTML request.
+The goal is minimal request volume and explicit human control rather than site-wide crawling.
 """
         )
 
@@ -436,11 +438,23 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
         st.session_state.catalog_scan_nonce = 0
     catalog_nonce = int(st.session_state.catalog_scan_nonce)
 
+    source_status = st.selectbox(
+        "Source status",
+        ["Testing / permission pending", "Approved for low-frequency scan", "Do not scan"],
+        index=0,
+        key=f"catalog_source_status_{catalog_nonce}",
+        help="Internal workflow flag only. Use 'Do not scan' to disable requests for a source you do not want the tool to access.",
+    )
+    if source_status == "Testing / permission pending":
+        st.caption("Testing mode: keep scans small and obtain winery approval before routine/recurring use.")
+    elif source_status == "Do not scan":
+        st.warning("This source is marked Do not scan. Network scan buttons are disabled until the status changes.")
+
     cs1, cs2 = st.columns([1, 2.2])
     with cs1:
         catalog_winery = st.text_input(
-            "Winery / producer (optional)",
-            placeholder="e.g., Eberle",
+            "Winery / producer",
+            placeholder="e.g., Ashes & Diamonds",
             key=f"catalog_winery_{catalog_nonce}",
         )
     with cs2:
@@ -456,6 +470,7 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
             "Scan this catalog page",
             type="primary",
             use_container_width=True,
+            disabled=source_status == "Do not scan",
             key=f"catalog_scan_btn_{catalog_nonce}",
         )
     with clear_col:
@@ -496,8 +511,8 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
 
     if catalog_fetch is not None:
         st.success(
-            f"Fetched exactly 1 catalog page · HTTP {catalog_fetch.status_code} · "
-            f"{catalog_fetch.bytes_read / 1024:.0f} KB · {catalog_fetch.robots_status}. "
+            f"Catalog page processed · HTTP {catalog_fetch.status_code} · "
+            f"{catalog_fetch.bytes_read / 1024:.0f} KB · {catalog_fetch.robots_status} · {catalog_fetch.request_note}. "
             "No individual product pages were opened automatically."
         )
 
@@ -514,7 +529,7 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
         st.markdown("#### Optional product-page follow-up")
         st.caption(
             f"Found {len(catalog_product_links)} likely same-site wine product page(s) in the catalog HTML. "
-            "Nothing below has been opened yet. Select only the pages you want to fetch once for price/details."
+            "Nothing below has been opened yet. Select only the pages you want to inspect."
         )
         product_link_df = pd.DataFrame(catalog_product_links)
         product_link_df.insert(0, "scan", False)
@@ -535,17 +550,17 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
         selected_count = len(selected_urls)
         st.caption(
             f"Selected: {selected_count}. Maximum 12 per batch. "
-            "Selected pages are fetched sequentially with a short pause between requests."
+            "Selected pages are fetched sequentially with a short pause between network requests."
         )
         if st.button(
             f"Scan selected product pages ({selected_count})",
             type="secondary",
-            disabled=selected_count == 0,
+            disabled=selected_count == 0 or source_status == "Do not scan",
             use_container_width=True,
             key=f"catalog_product_scan_btn_{catalog_nonce}",
         ):
             try:
-                with st.spinner(f"Scanning {selected_count} selected product page(s), one request each…"):
+                with st.spinner(f"Scanning {selected_count} selected product page(s)…"):
                     new_offers, failures, fetched_count = scan_selected_product_pages(selected_urls)
 
                 existing_offers = []
@@ -562,13 +577,24 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
                             evidence=str(row.get("evidence") or ""),
                             extraction_method=str(row.get("extraction_method") or ""),
                             confidence=str(row.get("confidence") or "Moderate"),
+                            varietal=str(row.get("varietal") or ""),
+                            graph_category=str(row.get("graph_category") or ""),
+                            general_category=str(row.get("general_category") or ""),
+                            region=str(row.get("region") or ""),
+                            subregion=str(row.get("subregion") or ""),
+                            alcohol_pct=None if pd.isna(row.get("alcohol_pct")) else row.get("alcohol_pct"),
+                            cases_produced=None if pd.isna(row.get("cases_produced")) else row.get("cases_produced"),
+                            estate=bool(row.get("estate", False)),
+                            single_vineyard=bool(row.get("single_vineyard", False)),
+                            product_tier=str(row.get("product_tier") or "Core"),
+                            availability_status=str(row.get("availability_status") or ""),
                         )
                     )
                 combined = merge_offers(existing_offers + new_offers)
                 st.session_state["catalog_offers"] = [o.to_dict() for o in combined]
                 st.session_state["catalog_product_scan_summary"] = (
-                    f"Fetched {fetched_count} explicitly selected product page(s). "
-                    f"Added/updated {len(new_offers)} dependable product-price record(s)."
+                    f"Processed {fetched_count} explicitly selected product page(s). "
+                    f"Added/updated {len(new_offers)} dependable product record(s) with price/metadata where visible."
                 )
                 st.session_state["catalog_product_scan_failures"] = failures
                 st.rerun()
@@ -576,83 +602,150 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
                 st.error(str(exc))
 
     if catalog_offers_data:
-        st.markdown("#### Detected wine offerings")
+        st.markdown("#### Review extracted product details")
         catalog_df = pd.DataFrame(catalog_offers_data)
-        catalog_display_cols = [
-            "wine", "vintage", "regular_price", "sale_price", "club_price",
-            "currency", "product_url", "confidence", "extraction_method",
+        for col, default in {
+            "varietal": "", "graph_category": "", "general_category": "", "region": "", "subregion": "",
+            "alcohol_pct": np.nan, "cases_produced": np.nan, "estate": False, "single_vineyard": False,
+            "product_tier": "Core", "availability_status": "",
+        }.items():
+            if col not in catalog_df.columns:
+                catalog_df[col] = default
+        catalog_df.insert(0, "stage", False)
+        review_cols = [
+            "stage", "wine", "vintage", "regular_price", "sale_price", "club_price",
+            "varietal", "graph_category", "general_category", "region", "subregion",
+            "alcohol_pct", "cases_produced", "estate", "single_vineyard", "product_tier",
+            "availability_status", "product_url", "confidence",
         ]
         catalog_editable = st.data_editor(
-            catalog_df[catalog_display_cols],
+            catalog_df[review_cols],
             hide_index=True,
             use_container_width=True,
             num_rows="dynamic",
             column_config={
+                "stage": st.column_config.CheckboxColumn("Stage", help="Add this reviewed row to the normal pending comp batch."),
                 "wine": st.column_config.TextColumn("Wine / product"),
                 "vintage": st.column_config.TextColumn("Vintage / NV"),
                 "regular_price": st.column_config.NumberColumn("Retail / regular", format="$%.2f"),
                 "sale_price": st.column_config.NumberColumn("Sale", format="$%.2f"),
                 "club_price": st.column_config.NumberColumn("Club / member", format="$%.2f"),
+                "alcohol_pct": st.column_config.NumberColumn("ABV %", format="%.1f"),
+                "cases_produced": st.column_config.NumberColumn("Cases", format="%d"),
+                "estate": st.column_config.CheckboxColumn("Estate"),
+                "single_vineyard": st.column_config.CheckboxColumn("Single vineyard"),
                 "product_url": st.column_config.LinkColumn("Product URL"),
             },
             key=f"catalog_editor_{catalog_nonce}",
         )
         st.caption(
-            "Review the rows before using them. Catalog/product pages can contain bundles, member pricing, alternate bottle sizes, "
-            "or non-wine merchandise. Nothing is written to the permanent comp database automatically."
+            "Review/edit these fields before staging. Product pages can contain member-only products, promotions, alternate bottle sizes, "
+            "or ambiguous marketing language; human approval remains required."
         )
 
-        dl1, dl2 = st.columns(2)
-        with dl1:
+        selected_catalog_rows = catalog_editable.loc[catalog_editable["stage"].fillna(False)].copy()
+        cstage1, cstage2 = st.columns([2, 1])
+        with cstage1:
+            stage_catalog_clicked = st.button(
+                f"Add {len(selected_catalog_rows)} reviewed product{'s' if len(selected_catalog_rows) != 1 else ''} to pending comp batch",
+                type="primary",
+                disabled=len(selected_catalog_rows) == 0,
+                use_container_width=True,
+                key=f"catalog_stage_btn_{catalog_nonce}",
+            )
+        with cstage2:
+            st.caption("Nothing is permanent until the normal GitHub batch commit below.")
+
+        if stage_catalog_clicked:
+            if not catalog_saved_winery.strip():
+                st.error("Enter the winery / producer name before staging catalog rows.")
+            else:
+                staged_records = []
+                duplicate_count = 0
+                skipped_count = 0
+                for _, row in selected_catalog_rows.iterrows():
+                    price = None
+                    price_type = "Winery retail"
+                    if pd.notna(row.get("regular_price")) and float(row.get("regular_price")) > 0:
+                        price = float(row.get("regular_price"))
+                        price_type = "Winery retail"
+                    elif pd.notna(row.get("sale_price")) and float(row.get("sale_price")) > 0:
+                        price = float(row.get("sale_price"))
+                        price_type = "Observed retail"
+                    elif pd.notna(row.get("club_price")) and float(row.get("club_price")) > 0:
+                        price = float(row.get("club_price"))
+                        price_type = "Wine club/member price"
+                    if price is None:
+                        skipped_count += 1
+                        continue
+                    vint_text = str(row.get("vintage") or "").strip()
+                    vintage_value = int(vint_text) if re.fullmatch(r"(?:19|20)\d{2}", vint_text) else np.nan
+                    cases_value = pd.to_numeric(row.get("cases_produced"), errors="coerce")
+                    abv_value = pd.to_numeric(row.get("alcohol_pct"), errors="coerce")
+                    record = {
+                        "winery": catalog_saved_winery.strip(),
+                        "wine": str(row.get("wine") or "").strip(),
+                        "vintage": vintage_value,
+                        "varietal": str(row.get("varietal") or "").strip(),
+                        "graph_category": str(row.get("graph_category") or "").strip(),
+                        "general_category": str(row.get("general_category") or "").strip(),
+                        "region": str(row.get("region") or "").strip(),
+                        "subregion": str(row.get("subregion") or "").strip(),
+                        "price": price,
+                        "price_type": price_type,
+                        "critic": "",
+                        "critic_score": np.nan,
+                        "cases_produced": np.nan if pd.isna(cases_value) else int(cases_value),
+                        "alcohol_pct": np.nan if pd.isna(abv_value) else float(abv_value),
+                        "estate": bool(row.get("estate", False)),
+                        "single_vineyard": bool(row.get("single_vineyard", False)),
+                        "product_tier": str(row.get("product_tier") or "Core").strip() or "Core",
+                        "source_name": catalog_saved_winery.strip(),
+                        "source_url": str(row.get("product_url") or "").strip(),
+                        "price_date": pd.Timestamp.today().date().isoformat(),
+                        "data_confidence": str(row.get("confidence") or "Moderate").strip(),
+                    }
+                    if not record["wine"] or not record["region"]:
+                        skipped_count += 1
+                        continue
+                    check = classify_existing_observation(all_data, record)
+                    if check.get("status") == "exact_duplicate":
+                        duplicate_count += 1
+                        continue
+                    staged_records.append(record)
+
+                if staged_records:
+                    new_catalog_df = pd.DataFrame(staged_records)
+                    current = st.session_state.uploaded_comps
+                    combined_pending = pd.concat([current, new_catalog_df], ignore_index=True) if current is not None else new_catalog_df
+                    st.session_state.uploaded_comps = normalize_comp_data(combined_pending)
+                    st.success(
+                        f"Staged {len(staged_records)} catalog observation(s) for the normal GitHub batch commit. "
+                        f"Exact duplicates skipped: {duplicate_count}. Other incomplete rows skipped: {skipped_count}."
+                    )
+                else:
+                    st.info(
+                        f"No new catalog rows were staged. Exact duplicates: {duplicate_count}; incomplete/no-price rows: {skipped_count}."
+                    )
+
+        with st.expander("Download reviewed catalog data (optional)"):
             st.download_button(
                 "Download reviewed catalog CSV",
-                catalog_editable.to_csv(index=False).encode("utf-8-sig"),
+                catalog_editable.drop(columns=["stage"], errors="ignore").to_csv(index=False).encode("utf-8-sig"),
                 file_name="winery_catalog_scan.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
-
-        reconstructed_catalog_offers = []
-        for _, catalog_row in catalog_editable.iterrows():
-            reconstructed_catalog_offers.append(
-                WineOffer(
-                    wine=str(catalog_row.get("wine") or ""),
-                    vintage=str(catalog_row.get("vintage") or ""),
-                    regular_price=None if pd.isna(catalog_row.get("regular_price")) else float(catalog_row.get("regular_price")),
-                    sale_price=None if pd.isna(catalog_row.get("sale_price")) else float(catalog_row.get("sale_price")),
-                    club_price=None if pd.isna(catalog_row.get("club_price")) else float(catalog_row.get("club_price")),
-                    currency=str(catalog_row.get("currency") or "USD"),
-                    product_url=str(catalog_row.get("product_url") or ""),
-                    evidence="Reviewed catalog extraction",
-                    extraction_method=str(catalog_row.get("extraction_method") or "Reviewed"),
-                    confidence=str(catalog_row.get("confidence") or "Moderate"),
-                )
-            )
-        catalog_import_rows = pd.DataFrame(
-            offers_to_rudder_rows(reconstructed_catalog_offers, winery=catalog_saved_winery)
-        )
-        with dl2:
-            st.download_button(
-                "Download comp-import CSV",
-                catalog_import_rows.to_csv(index=False).encode("utf-8-sig"),
-                file_name="wine_market_intelligence_catalog_comp_import.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        st.info(
-            "The comp-import export is intentionally basic: it carries observed wine/price/source fields but leaves varietal, "
-            "category, AVA, tier, Estate, and similar attributes blank for later enrichment/review."
-        )
     elif catalog_fetch is not None:
         if catalog_product_links:
             st.info(
                 "No dependable product + price pairs were present on the catalog page itself. "
-                "Likely product pages were discovered above; select only the wines you want to inspect and run the optional follow-up scan."
+                "Likely product pages were discovered above; select only the wines you want to inspect."
             )
         else:
             st.warning(
                 "The page was fetched, but no dependable product + price records or likely wine product links were found in its static HTML/JSON-LD. "
-                "The shop may be JavaScript-rendered. The scan ends here rather than escalating to browser automation."
+                "The scan ends here rather than escalating to browser automation."
             )
 
     st.divider()
@@ -1097,7 +1190,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.3.15 approach
+### v0.3.16 approach
 
 The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
@@ -1117,6 +1210,6 @@ The model is a market-positioning aid, not a guarantee of demand or sell-through
 
 **Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by an administrator. The AI extracts visible facts only; deterministic classification rules are applied afterward; a human must review/edit the proposed row before it is added to the session comp database.
 
-**Experimental Winery Catalog Scan** first makes a user-initiated request only to the exact public catalog/shop page entered by an administrator, after checking `robots.txt`. It can discover same-site product links without opening them; individual product pages are fetched only when explicitly selected by the administrator. It does not execute JavaScript, bypass access controls, retry rate limits automatically, or automatically write scan output into the comp database.
+**Experimental Winery Catalog Scan** first makes a user-initiated request only to the exact public catalog/shop page entered by an administrator, after checking `robots.txt`. It can discover same-site product links without opening them; individual product pages are fetched only when explicitly selected by the administrator. Selected product pages can extract conservative factual metadata for review. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not execute JavaScript, bypass access controls, or automatically retry rate limits.
         """
     )
