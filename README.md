@@ -1,29 +1,30 @@
-# Wine Market Intelligence v0.3.21 — VinoShipper mapping quality patch
+# Wine Market Intelligence v0.3.22 — VinoShipper quality cleanup
 
-This focused patch keeps the v0.3.20 documented VinoShipper Product Feed adapter and improves how provider records are converted into Wine Market Intelligence comp rows.
+This patch is a final quality pass on the provider-feed route before moving testing to another commerce platform.
 
 ## What changed
 
-- Recovers vintage from nested VinoShipper product metadata, not just top-level fields or the visible product title.
-- Searches nested provider metadata for varietal, appellation, ABV, case production, and description fields when the feed shape varies.
-- Normalizes common varietal/label aliases such as `Pino Noir` → `Pinot Noir` and `Petite Verdot` → `Petit Verdot`.
-- Recognizes explicit blend names such as `Cabernet and Merlot Blend` as multi-grape blends rather than blindly accepting one provider category.
-- Recognizes Rhône-style naming such as `Le Rhone` as `Rhône Blend` when more specific composition is unavailable.
-- Prefers explicit multi-grape composition in product descriptions/metadata over a single-varietal provider classification.
-- Expands deterministic categories to include `Petit Verdot`, `Tannat`, `Malbec`, `Grenache Blanc`, and Albariño aliases.
-- Caps a VinoShipper row at `Moderate` confidence when vintage is missing or the row still cannot be classified beyond `Other`.
-- Preserves the existing low-request provider-feed workflow and all prior catalog safeguards.
+- More robust VinoShipper ABV extraction, including nested metadata / label-value structures.
+- Generic normalization for provider geography display strings without inventing a narrower AVA.
+- `GSM` expands to Grenache / Syrah / Mourvèdre for classification.
+- Provider values that are obvious product-name typos are no longer treated as grape varieties.
+- Explicit feed composition is preferred when present.
+- Adds an auditable, source-specific last-resort correction layer for verified 915 Lincoln records where the provider feed omits or mislabels stable facts.
+- 915 Lincoln corrections cover Distinctive, Trois, Le Rhone, Better Together and stable vintage-specific ABVs observed in the public VinoShipper catalog.
+- Existing low-request / no-browser-automation safeguards are unchanged.
 
 ## Files to replace
 
 - `app.py`
 - `catalog_scraper.py`
 
-Optional test update:
+Optional but recommended:
 
 - `tests/test_catalog_enrichment.py`
 
+No database, secrets, token, or requirements changes are needed.
+
 ## Validation
 
-- Python compilation passed for `app.py` and `catalog_scraper.py`.
-- Catalog/enrichment regression suite: **14/14 passed**.
+- Python compilation passed.
+- Catalog/enrichment regression suite: 18/18 tests passed.

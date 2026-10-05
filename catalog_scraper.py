@@ -6,6 +6,7 @@ import re
 import socket
 import time
 import unicodedata
+from difflib import SequenceMatcher
 from dataclasses import dataclass, asdict
 from datetime import date
 from typing import Any, Iterable
@@ -354,6 +355,53 @@ _PRODUCT_LABEL_ALIAS_MAP = {
 }
 
 
+# Source-specific corrections are a last-resort quality layer, not the primary parser.
+# They are keyed by the public provider ID + canonical product identity + vintage and
+# are only used when the provider feed omits or mislabels a stable wine fact.
+# Keeping these overrides explicit makes them auditable and prevents source quirks
+# from becoming global classification rules.
+_VINOSHIPPER_PRODUCT_OVERRIDES: dict[tuple[str, str, str], dict[str, Any]] = {
+    ("4112", "better together", "2021"): {
+        "alcohol_pct": 15.34,
+        "varietal": "85% Zinfandel, 15% Petite Sirah",
+        "graph_category": "Zinfandel",
+    },
+    ("4112", "cabernet and merlot blend", "2018"): {"alcohol_pct": 13.65},
+    ("4112", "cabernet franc", "2023"): {"alcohol_pct": 15.3},
+    ("4112", "cabernet sauvignon", "2021"): {"alcohol_pct": 15.58},
+    ("4112", "distinctive", "2022"): {
+        "alcohol_pct": 15.3,
+        "varietal": "50% Cabernet Sauvignon, 50% Petite Sirah",
+        "graph_category": "Red Blend",
+    },
+    ("4112", "distinctive", "2023"): {
+        "alcohol_pct": 15.4,
+        "graph_category": "Red Blend",
+    },
+    ("4112", "le rhone", "2021"): {
+        "alcohol_pct": 14.4,
+        "varietal": "67% Mourvèdre, 33% Grenache",
+        "graph_category": "Rhône Blend",
+    },
+    ("4112", "le rhone", "2023"): {
+        "alcohol_pct": 15.1,
+        "varietal": "38% Grenache, 32% Syrah, 30% Mourvèdre",
+        "graph_category": "Rhône Blend",
+    },
+    ("4112", "merlot", "2019"): {"alcohol_pct": 14.95},
+    ("4112", "petit verdot", "2021"): {"alcohol_pct": 14.77},
+    ("4112", "petite sirah", "2023"): {"alcohol_pct": 16.0},
+    ("4112", "pinot noir", "2023"): {"alcohol_pct": 14.54},
+    ("4112", "reserve cabernet sauvignon", "2022"): {"alcohol_pct": 15.4},
+    ("4112", "tannat", "2023"): {"alcohol_pct": 15.9},
+    ("4112", "trois", "2021"): {
+        "alcohol_pct": 15.3,
+        "varietal": "69% Malbec, 17% Petit Verdot, 14% Cabernet Sauvignon",
+        "graph_category": "Bordeaux Blend",
+    },
+}
+
+
 def _normalize_wine_label_aliases(value: str) -> str:
     clean = _clean_name(value)
     exact = _PRODUCT_LABEL_ALIAS_MAP.get(_ascii_key(clean))
@@ -376,6 +424,8 @@ def _normalize_varietal_aliases(value: str) -> str:
     text = _clean_name(value)
     if not text:
         return ""
+    if _ascii_key(text) in {"gsm", "g s m"}:
+        return "Grenache, Syrah, Mourvèdre"
     # Preserve percentages while normalizing the grape phrase following them.
     pieces = re.split(r"\s*(?:,|/|\+|\band\b)\s*", text, flags=re.I)
     normalized: list[str] = []
@@ -431,6 +481,162 @@ def _prefer_explicit_blend(provider_varietal: str, title: str, rich_text: str) -
     if grape_count(inferred) >= 2 and grape_count(provider) <= 1:
         return inferred
     return provider or inferred
+
+
+def _labeled_metadata_value(node: Any, labels: tuple[str, ...], *, max_depth: int = 7) -> Any:
+    """Find a value stored as a generic label/value metadata pair.
+
+    Provider feeds often encode technical facts as [{label: "Alcohol Level",
+    value: "15.3%"}] rather than as a stable top-level field.  This helper is
+    conservative: the label must clearly match one of the requested concepts.
+    """
+    wanted = {_ascii_key(x) for x in labels}
+
+    def label_matches(value: Any) -> bool:
+        key = _ascii_key(_json_text(value))
+        if not key:
+            return False
+        return any(key == w or w in key for w in wanted)
+
+    def walk(value: Any, depth: int) -> Any:
+        if depth > max_depth:
+            return None
+        if isinstance(value, dict):
+            label = _json_lookup(value, "label", "name", "key", "type", "code", "field", "metric")
+            if label_matches(label):
+                candidate = _json_lookup(value, "value", "amount", "number", "text", "displayValue", "display")
+                if candidate not in (None, "", [], {}):
+                    return candidate
+            for child in value.values():
+                found = walk(child, depth + 1)
+                if found not in (None, "", [], {}):
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = walk(child, depth + 1)
+                if found not in (None, "", [], {}):
+                    return found
+        return None
+
+    return walk(node, 0)
+
+
+def _coerce_percent(value: Any) -> float | None:
+    if value in (None, "", [], {}):
+        return None
+    text = _json_text(value) if isinstance(value, (dict, list)) else str(value)
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*%?", text.replace(",", ""))
+    if not m:
+        return None
+    try:
+        number = float(m.group(1))
+    except ValueError:
+        return None
+    # Some APIs encode percentages as fractions.
+    if 0 < number <= 1:
+        number *= 100
+    if 5 <= number <= 25:
+        return round(number, 3)
+    return None
+
+
+def _extract_vinoshipper_abv(node: dict[str, Any], evidence_text: str = "") -> float | None:
+    aliases = (
+        "alcohol", "alcoholLevel", "alcohol_level", "alcoholPct", "alcohol_pct",
+        "abv", "alcoholByVolume", "alcohol_by_volume", "alcoholPercent",
+        "alcoholPercentage", "alcoholContent",
+    )
+    direct = _json_lookup(node, *aliases)
+    if direct in (None, "", [], {}):
+        direct = _json_lookup_deep(node, *aliases, max_depth=8)
+    value = _coerce_percent(direct)
+    if value is not None:
+        return value
+    labeled = _labeled_metadata_value(
+        node,
+        ("alcohol level", "abv", "alcohol by volume", "alcohol percentage", "alcohol percent"),
+    )
+    value = _coerce_percent(labeled)
+    if value is not None:
+        return value
+    return _extract_abv(evidence_text)
+
+
+def _extract_feed_composition(node: dict[str, Any], evidence_text: str = "") -> str:
+    aliases = (
+        "composition", "wineComposition", "wine_composition", "blendComposition",
+        "blend_composition", "grapeComposition", "grape_composition", "varietals",
+        "grapeVarieties", "grape_varieties", "grapes",
+    )
+    direct = _json_lookup(node, *aliases)
+    if direct in (None, "", [], {}):
+        direct = _json_lookup_deep(node, *aliases, max_depth=8)
+    text = _json_text(direct)
+    if text:
+        parsed = _normalize_varietal_aliases(_extract_varietal("", text) or text)
+        if parsed:
+            return parsed
+    labeled = _labeled_metadata_value(node, ("composition", "blend", "varietal composition", "grape composition"))
+    if labeled not in (None, "", [], {}):
+        text = _json_text(labeled)
+        parsed = _normalize_varietal_aliases(_extract_varietal("", text) or text)
+        if parsed:
+            return parsed
+    inferred = _normalize_varietal_aliases(_extract_varietal("", evidence_text))
+    return inferred if "," in inferred or "%" in inferred else ""
+
+
+def _normalize_provider_appellation(value: str) -> str:
+    """Remove provider display wrappers without inventing a narrower AVA."""
+    text = _clean_name(value)
+    if not text:
+        return ""
+    text = re.sub(r"^CA\s*[-–—:]\s*", "", text, flags=re.I).strip()
+    text = re.sub(r"\s*\((?:Central Coast|North Coast|California)\)\s*$", "", text, flags=re.I).strip()
+    # Provider strings sometimes use County - AVA. Prefer the explicit AVA at
+    # the end when it is a recognized winegrowing area; otherwise retain county.
+    known_specific = [
+        "San Antonio Valley", "San Luis Obispo Coast", "Paso Robles", "Napa Valley",
+        "El Pomar District", "Templeton Gap District", "Adelaida District",
+        "Willow Creek District", "Geneseo District", "Creston District",
+        "Estrella District", "San Juan Creek District", "York Mountain",
+    ]
+    for name in known_specific:
+        if re.search(rf"\b{re.escape(name)}\b", text, re.I):
+            # If this is an explicit nested AVA (e.g. Monterey County - San Antonio Valley),
+            # use the AVA.  Paso Robles remains a broad region and can still have a subregion.
+            if " - " in text and text.casefold().rstrip().endswith(name.casefold()):
+                return name
+    return text
+
+
+def _provider_varietal_is_title_noise(provider_varietal: str, canonical_name: str) -> bool:
+    p = _ascii_key(provider_varietal)
+    t = _ascii_key(canonical_name)
+    if not p or not t:
+        return False
+    # A feed typo like "Distinvtive" in the varietal slot is much closer to the
+    # marketing product name than to a grape.  Do not propagate it as varietal.
+    known_grape = _infer_graph_category(provider_varietal, provider_varietal, provider_varietal) != "Other"
+    return (not known_grape) and SequenceMatcher(None, p, t).ratio() >= 0.78
+
+
+def _apply_vinoshipper_record_override(
+    *, producer_id: str, wine: str, vintage: str, varietal: str,
+    graph_category: str, alcohol_pct: float | None,
+) -> tuple[str, str, float | None]:
+    override = _VINOSHIPPER_PRODUCT_OVERRIDES.get(
+        (str(producer_id), _ascii_key(wine), str(vintage or "")), {}
+    )
+    if not override:
+        return varietal, graph_category, alcohol_pct
+    if override.get("varietal"):
+        varietal = str(override["varietal"])
+    if override.get("graph_category"):
+        graph_category = str(override["graph_category"])
+    if alcohol_pct is None and override.get("alcohol_pct") is not None:
+        alcohol_pct = float(override["alcohol_pct"])
+    return varietal, graph_category, alcohol_pct
 
 
 def _looks_like_vinoshipper_product_node(node: dict[str, Any]) -> bool:
@@ -505,18 +711,15 @@ def extract_vinoshipper_feed_offers(payload: Any, *, producer_id: str, shop_url:
                 "wineVarietal", "wine_varietal", "varietalName", "productVarietal"
             )
         provider_varietal = _json_text(provider_varietal_value)
+        if _provider_varietal_is_title_noise(provider_varietal, canonical_name):
+            provider_varietal = ""
 
         appellation_value = _json_lookup(node, "appellation", "ava", "region", "origin")
         if appellation_value in (None, "", [], {}):
             appellation_value = _json_lookup_deep(node, "appellation", "ava", "region", "origin")
-        appellation = _json_text(appellation_value)
+        appellation = _normalize_provider_appellation(_json_text(appellation_value))
 
-        alcohol_value = _json_lookup(node, "alcohol", "alcoholLevel", "alcoholPct", "abv", "alcoholByVolume")
-        if alcohol_value in (None, "", [], {}):
-            alcohol_value = _json_lookup_deep(node, "alcohol", "alcoholLevel", "alcoholPct", "abv", "alcoholByVolume")
-        abv = _coerce_price(alcohol_value)
-        if abv is not None and not (5 <= abv <= 25):
-            abv = None
+        abv = _extract_vinoshipper_abv(node, " ".join(x for x in [raw_name, description] if x))
 
         cases_raw = _json_lookup(node, "casesProduced", "caseProduction", "productionCases")
         if cases_raw in (None, "", [], {}):
@@ -534,11 +737,16 @@ def extract_vinoshipper_feed_offers(payload: Any, *, producer_id: str, shop_url:
         # string.  Blend composition in this text can override a generic single-
         # varietal category supplied by the provider.
         combined = " ".join(x for x in [raw_name, provider_varietal, appellation, description] if x)
-        varietal = _prefer_explicit_blend(provider_varietal, canonical_name, combined)
+        feed_composition = _extract_feed_composition(node, combined)
+        varietal = _prefer_explicit_blend(feed_composition or provider_varietal, canonical_name, combined)
         region, subregion, geography_conflict = _extract_region(combined)
         if not region and appellation:
             region = appellation
         graph = _infer_graph_category(varietal, canonical_name, combined)
+        varietal, graph, abv = _apply_vinoshipper_record_override(
+            producer_id=producer_id, wine=canonical_name, vintage=vintage,
+            varietal=varietal, graph_category=graph, alcohol_pct=abv,
+        )
         general = _infer_general_category(graph, varietal, canonical_name)
         estate_flag = bool(_json_bool(node, "estate", "estateGrown", "isEstate") or False)
         single_flag = _json_bool(node, "singleVineyard", "isSingleVineyard")
@@ -1385,7 +1593,7 @@ def _extract_region(text: str) -> tuple[str, str, bool]:
         "Yountville", "Calistoga", "St. Helena", "Adelaida District", "Willow Creek District",
         "Templeton Gap District", "Santa Margarita Ranch", "York Mountain",
         "El Pomar District", "Geneseo District", "Creston District", "Estrella District",
-        "San Juan Creek District",
+        "San Juan Creek District", "San Antonio Valley",
     ]
     broad_names = {
         "Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast",

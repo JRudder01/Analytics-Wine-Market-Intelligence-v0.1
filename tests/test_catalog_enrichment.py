@@ -244,7 +244,7 @@ def test_vinoshipper_nested_vintage_and_varietal_metadata():
     o = offers[0]
     assert o.wine == "Better Together"
     assert o.vintage == "2021"
-    assert o.varietal == "Zinfandel"
+    assert o.varietal == "85% Zinfandel, 15% Petite Sirah"
     assert o.graph_category == "Zinfandel"
     assert o.general_category == "Red"
     assert o.confidence == "High"
@@ -319,3 +319,92 @@ def test_vinoshipper_missing_vintage_caps_confidence():
     )[0]
     assert o.vintage == ""
     assert o.confidence == "Moderate"
+
+
+def test_vinoshipper_labeled_metadata_abv_and_geography_normalization():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {
+        "products": [{
+            "id": 3001,
+            "name": "2023 Tannat",
+            "consumerPrice": 56,
+            "vintage": 2023,
+            "varietal": "Tannat",
+            "appellation": "CA - Monterey County - San Antonio Valley",
+            "metadata": [
+                {"label": "Alcohol Level", "value": "15.9%"},
+            ],
+        }]
+    }
+    o = extract_vinoshipper_feed_offers(
+        payload, producer_id="9999", shop_url="https://vinoshipper.com/shop/example"
+    )[0]
+    assert o.alcohol_pct == 15.9
+    assert o.region == "San Antonio Valley"
+
+
+def test_vinoshipper_gsm_expands_to_grapes():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {"products": [{
+        "id": 3002,
+        "name": "2023 Le Rhone",
+        "consumerPrice": 62,
+        "vintage": 2023,
+        "varietal": "GSM",
+        "appellation": "Paso Robles",
+    }]}
+    o = extract_vinoshipper_feed_offers(
+        payload, producer_id="9999", shop_url="https://vinoshipper.com/shop/example"
+    )[0]
+    assert o.varietal == "Grenache, Syrah, Mourvèdre"
+    assert o.graph_category == "Rhône Blend"
+
+
+def test_915_lincoln_verified_distinctive_trois_and_le_rhone_overrides():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {"products": [
+        {"id": 4001, "name": "Distinctive", "consumerPrice": 49, "vintage": 2022,
+         "varietal": "Cabernet Sauvignon", "appellation": "Paso Robles"},
+        {"id": 4002, "name": "Distinctive", "consumerPrice": 56, "vintage": 2023,
+         "varietal": "Distinvtive", "appellation": "Paso Robles"},
+        {"id": 4003, "name": "Trois", "consumerPrice": 47, "vintage": 2021,
+         "varietal": "Malbec", "appellation": "Paso Robles"},
+        {"id": 4004, "name": "Le Rhone", "consumerPrice": 56, "vintage": 2021,
+         "varietal": "Mourvèdre", "appellation": "Paso Robles"},
+    ]}
+    offers = extract_vinoshipper_feed_offers(
+        payload, producer_id="4112", shop_url="https://vinoshipper.com/shop/915_lincoln"
+    )
+    by_key = {(o.wine, o.vintage): o for o in offers}
+    d22 = by_key[("Distinctive", "2022")]
+    assert d22.varietal == "50% Cabernet Sauvignon, 50% Petite Sirah"
+    assert d22.graph_category == "Red Blend"
+    assert d22.alcohol_pct == 15.3
+    d23 = by_key[("Distinctive", "2023")]
+    assert d23.varietal == ""
+    assert d23.graph_category == "Red Blend"
+    assert d23.alcohol_pct == 15.4
+    trois = by_key[("Trois", "2021")]
+    assert trois.varietal == "69% Malbec, 17% Petit Verdot, 14% Cabernet Sauvignon"
+    assert trois.graph_category == "Bordeaux Blend"
+    assert trois.alcohol_pct == 15.3
+    lr = by_key[("Le Rhone", "2021")]
+    assert lr.varietal == "67% Mourvèdre, 33% Grenache"
+    assert lr.graph_category == "Rhône Blend"
+    assert lr.alcohol_pct == 14.4
+
+
+def test_915_lincoln_public_catalog_abv_fallbacks():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {"products": [
+        {"id": 5001, "name": "2019 Merlot", "consumerPrice": 75, "vintage": 2019, "varietal": "Merlot", "appellation": "Paso Robles"},
+        {"id": 5002, "name": "2023 Pino Noir", "consumerPrice": 58, "vintage": 2023, "varietal": "Pino Noir", "appellation": "San Luis Obispo Coast"},
+        {"id": 5003, "name": "2021 Cabernet Sauvignon", "consumerPrice": 50, "vintage": 2021, "varietal": "Cabernet Sauvignon", "appellation": "Paso Robles, El Pomar District"},
+    ]}
+    offers = extract_vinoshipper_feed_offers(
+        payload, producer_id="4112", shop_url="https://vinoshipper.com/shop/915_lincoln"
+    )
+    by_name = {o.wine: o for o in offers}
+    assert by_name["Merlot"].alcohol_pct == 14.95
+    assert by_name["Pinot Noir"].alcohol_pct == 14.54
+    assert by_name["Cabernet Sauvignon"].alcohol_pct == 15.58

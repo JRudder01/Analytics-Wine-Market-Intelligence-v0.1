@@ -1,31 +1,12 @@
-# v0.3.21 update instructions
+# v0.3.22 update instructions
 
-1. Replace root `app.py`.
-2. Replace root `catalog_scraper.py`.
-3. Optionally replace `tests/test_catalog_enrichment.py`.
-4. Commit to `main` and let Streamlit redeploy.
+1. Open the repository root on the `main` branch.
+2. Replace `app.py`.
+3. Replace `catalog_scraper.py`.
+4. Optional: replace `tests/test_catalog_enrichment.py` so the repository contains the current regression tests.
+5. Commit the files and allow Streamlit to redeploy.
+6. Re-run the 915 Lincoln VinoShipper scan once as a regression check.
+7. Export the reviewed table and verify Distinctive / Trois / Le Rhone plus ABV fields.
+8. Then move testing to a winery on a different commerce platform.
 
-No changes are required to:
-
-- `requirements.txt`
-- `.streamlit/secrets.toml`
-- GitHub token permissions
-- `data/wine_comps.csv`
-
-## Recommended repeat test
-
-Use the same VinoShipper source:
-
-`https://vinoshipper.com/shop/915_lincoln`
-
-The app should continue to auto-detect producer `4112` and use the documented Product Feed. After scanning, review especially:
-
-- vintage population
-- `Better Together` varietal/category if provider metadata exposes Zinfandel
-- `Cabernet and Merlot Blend` → Bordeaux Blend
-- `Le Rhone` → Rhône Blend
-- `Pino Noir` → Pinot Noir
-- `Petite Verdot` → Petit Verdot
-- explicit multi-grape compositions overriding a misleading single-varietal provider category
-
-Rows still lacking a defensible vintage/category should be marked `Moderate` rather than `High` confidence.
+No changes are required to `requirements.txt`, `.streamlit/secrets.toml`, GitHub token permissions, or `data/wine_comps.csv`.
