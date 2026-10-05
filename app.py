@@ -44,6 +44,8 @@ from catalog_scraper import (
     USER_AGENT as CATALOG_USER_AGENT,
     is_vinoshipper_url,
     infer_vinoshipper_producer_id,
+    finalize_vinoshipper_offer_dicts,
+    CATALOG_PARSER_BUILD,
 )
 from vision_intake import (
     extract_wine_from_images,
@@ -83,7 +85,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.23</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.24</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -117,7 +119,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.23 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.24 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -487,6 +489,7 @@ The goal is minimal request volume and explicit human control rather than site-w
             "VinoShipper detected. The documented Product Feed is preferred over scraping rendered shop content; "
             "no VinoShipper API key is required for this public product-feed route."
         )
+    st.caption(f"Catalog parser build: {CATALOG_PARSER_BUILD}")
 
     scan_col, clear_col = st.columns([3, 1])
     with scan_col:
@@ -532,6 +535,26 @@ The goal is minimal request volume and explicit human control rather than site-w
     catalog_offers_data = st.session_state.get("catalog_offers", [])
     catalog_product_links = st.session_state.get("catalog_product_links", [])
     catalog_saved_winery = st.session_state.get("catalog_winery_value", catalog_winery.strip())
+
+    # Streamlit may preserve serialized offer rows across a source-code hot reload.
+    # Re-run VinoShipper rows through the current finalizer before they ever reach
+    # the editor/export so stale session state cannot mask a parser deployment.
+    if catalog_fetch is not None and getattr(catalog_fetch, "provider", "") == "VinoShipper" and catalog_offers_data:
+        resolved_provider_id = str(provider_id or "").strip()
+        if not resolved_provider_id:
+            provider_note_for_id = str(getattr(catalog_fetch, "provider_note", "") or "")
+            match = re.search(r"producer\s+(\d+)", provider_note_for_id, re.I)
+            if match:
+                resolved_provider_id = match.group(1)
+        if not resolved_provider_id:
+            for _row in catalog_offers_data:
+                candidate = str((_row or {}).get("provider_id") or "").strip() if isinstance(_row, dict) else ""
+                if candidate:
+                    resolved_provider_id = candidate
+                    break
+        if resolved_provider_id:
+            catalog_offers_data = finalize_vinoshipper_offer_dicts(catalog_offers_data, resolved_provider_id)
+            st.session_state["catalog_offers"] = catalog_offers_data
 
     if catalog_fetch is not None:
         provider_note = getattr(catalog_fetch, "provider_note", "")
@@ -625,6 +648,7 @@ The goal is minimal request volume and explicit human control rather than site-w
                             single_vineyard=bool(row.get("single_vineyard", False)),
                             product_tier=str(row.get("product_tier") or "Core"),
                             availability_status=str(row.get("availability_status") or ""),
+                            provider_id=str(row.get("provider_id") or provider_id or ""),
                         )
                     )
                 combined = merge_offers(existing_offers + new_offers)
@@ -1233,7 +1257,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.3.23 approach
+### v0.3.24 approach
 
 The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 

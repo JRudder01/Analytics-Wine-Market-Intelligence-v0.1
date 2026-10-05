@@ -482,3 +482,38 @@ def test_vinoshipper_finalizer_runs_idempotently():
     once = finalize_vinoshipper_offers([offer], "4112")
     twice = finalize_vinoshipper_offers(once, "4112")
     assert once[0].to_dict() == twice[0].to_dict()
+
+
+def test_finalize_vinoshipper_offer_dicts_upgrades_stale_session_rows():
+    from catalog_scraper import finalize_vinoshipper_offer_dicts
+
+    stale = [{
+        "wine": "Distinctive",
+        "vintage": "2022",
+        "regular_price": 49.0,
+        "sale_price": None,
+        "club_price": None,
+        "currency": "USD",
+        "product_url": "https://vinoshipper.com/shop/915_lincoln/distinctive_163765",
+        "evidence": "",
+        "extraction_method": "VinoShipper Product Feed",
+        "confidence": "High",
+        "varietal": "Cabernet Sauvignon",
+        "graph_category": "Cabernet Sauvignon",
+        "general_category": "Red",
+        "region": "Paso Robles",
+        "subregion": "",
+        "alcohol_pct": None,
+        "cases_produced": None,
+        "estate": False,
+        "single_vineyard": False,
+        "product_tier": "Core",
+        "availability_status": "Available",
+    }]
+    upgraded = finalize_vinoshipper_offer_dicts(stale, "4112")
+    assert len(upgraded) == 1
+    row = upgraded[0]
+    assert row["varietal"] == "50% Cabernet Sauvignon, 50% Petite Sirah"
+    assert row["graph_category"] == "Red Blend"
+    assert row["alcohol_pct"] == 15.3
+    assert row["provider_id"] == "4112"

@@ -1,19 +1,19 @@
-# v0.3.23 update instructions
+# Update instructions — v0.3.24
 
-Replace these root-level GitHub files:
-
+Replace these files in the repository root:
 - `app.py`
 - `catalog_scraper.py`
 
-Optional but recommended for keeping the repository test suite current:
-
+Recommended test update:
 - `tests/test_catalog_enrichment.py`
 
 No changes are required to:
-
 - `requirements.txt`
 - Streamlit secrets
 - GitHub token permissions
 - `data/wine_comps.csv`
 
-After Streamlit redeploys, rerun 915 Lincoln once and export the review table. The status message for a VinoShipper feed now explicitly states that final provider normalization was applied before review.
+After Streamlit redeploys, confirm the catalog scanner visibly says:
+`Catalog parser build: v0.3.24`
+
+Then either click **Clear catalog scan** once or simply rescan 915 Lincoln. v0.3.24 also upgrades stale VinoShipper session rows automatically, so the old serialized rows should no longer survive into the review/export table unchanged.

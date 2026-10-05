@@ -771,6 +771,52 @@ def finalize_vinoshipper_offers(offers: list[WineOffer], producer_id: str = "") 
     finalized = [_finalize_vinoshipper_offer(o, producer_id) for o in offers]
     return _dedupe(finalized)
 
+
+def finalize_vinoshipper_offer_dicts(rows: list[dict[str, Any]], producer_id: str = "") -> list[dict[str, Any]]:
+    """Re-normalize serialized VinoShipper rows already held in UI session state.
+
+    Streamlit can preserve session_state across a code hot-reload.  Older serialized
+    offer dictionaries must therefore be upgraded as well as newly fetched rows;
+    otherwise a successful parser deployment can appear to have had no effect.
+    """
+    offers: list[WineOffer] = []
+    pid_default = str(producer_id or "").strip()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        def _none_if_nan(value: Any) -> Any:
+            try:
+                if value != value:
+                    return None
+            except Exception:
+                pass
+            return value
+        offers.append(WineOffer(
+            wine=str(row.get("wine") or ""),
+            vintage=str(row.get("vintage") or ""),
+            regular_price=_none_if_nan(row.get("regular_price")),
+            sale_price=_none_if_nan(row.get("sale_price")),
+            club_price=_none_if_nan(row.get("club_price")),
+            currency=str(row.get("currency") or "USD"),
+            product_url=str(row.get("product_url") or ""),
+            evidence=str(row.get("evidence") or ""),
+            extraction_method=str(row.get("extraction_method") or "VinoShipper Product Feed"),
+            confidence=str(row.get("confidence") or "Moderate"),
+            varietal=str(row.get("varietal") or ""),
+            graph_category=str(row.get("graph_category") or ""),
+            general_category=str(row.get("general_category") or ""),
+            region=str(row.get("region") or ""),
+            subregion=str(row.get("subregion") or ""),
+            alcohol_pct=_none_if_nan(row.get("alcohol_pct")),
+            cases_produced=_none_if_nan(row.get("cases_produced")),
+            estate=bool(row.get("estate", False)),
+            single_vineyard=bool(row.get("single_vineyard", False)),
+            product_tier=str(row.get("product_tier") or "Core"),
+            availability_status=str(row.get("availability_status") or ""),
+            provider_id=str(row.get("provider_id") or pid_default),
+        ))
+    return [o.to_dict() for o in finalize_vinoshipper_offers(offers, pid_default)]
+
 def _looks_like_vinoshipper_product_node(node: dict[str, Any]) -> bool:
     name = _json_lookup(node, "name", "title", "productName", "wineName", "displayName")
     price = _json_lookup(node, "price", "consumerPrice", "retailPrice", "msrp", "unitPrice")
