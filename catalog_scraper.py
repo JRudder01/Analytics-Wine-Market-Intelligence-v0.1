@@ -697,17 +697,14 @@ def _first_match(patterns: list[str], text: str, flags: int = re.I) -> str:
     return ""
 
 
-def _extract_region(text: str) -> tuple[str, str]:
-    """Extract a broad AVA and only a single unambiguous narrower district."""
-    patterns = [
-        r"(?:appellation|ava|region)\s*[:\-]?\s*([A-Z][A-Za-zÀ-ÿ0-9'&.\- ]{2,60}?)(?=\s{2,}|\s(?:technical|alcohol|harvest|cases|vineyard|$))",
-        r"\b([A-Z][A-Za-zÀ-ÿ'&.\- ]{2,50}\sAVA)\b",
-    ]
-    found = _first_match(patterns, text)
-    if found:
-        found = re.sub(r"\s+AVA$", "", found, flags=re.I).strip()
-        return found, ""
+def _extract_region(text: str) -> tuple[str, str, bool]:
+    """Extract broad AVA + one unambiguous subregion.
 
+    Returns (region, subregion, geography_conflict).  The conflict flag is set
+    when the page contains evidence for two or more distinct narrower AVAs /
+    districts.  In that case we preserve the broad region but intentionally
+    leave subregion blank rather than choosing one arbitrarily.
+    """
     known = [
         "Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast",
         "Russian River Valley", "Carneros", "Oak Knoll District", "Howell Mountain",
@@ -715,23 +712,73 @@ def _extract_region(text: str) -> tuple[str, str]:
         "Yountville", "Calistoga", "St. Helena", "Adelaida District", "Willow Creek District",
         "Templeton Gap District", "Santa Margarita Ranch", "York Mountain",
     ]
-    hits = []
-    for name in known:
-        if re.search(rf"\b{re.escape(name)}\b", text, re.I):
-            hits.append(name)
-    if not hits:
-        return "", ""
-
     broad_names = {
         "Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast",
         "Carneros", "Russian River Valley",
     }
-    broad = next((x for x in hits if x in broad_names), hits[0])
-    narrow_hits = list(dict.fromkeys(x for x in hits if x != broad))
-    # Multiple distinct districts are meaningful evidence of multi-area sourcing; do not
-    # arbitrarily choose one and misstate the wine's provenance.
-    sub = narrow_hits[0] if len(narrow_hits) == 1 else ""
-    return broad, sub
+
+    # Collect known AVA/district mentions first instead of returning immediately
+    # from a single "Appellation:" field.  Product pages sometimes show one
+    # technical-sheet appellation while the sourcing prose names additional
+    # districts; those multi-area wines should not be assigned to just one.
+    mentions: list[tuple[int, str]] = []
+    for name in known:
+        for match in re.finditer(rf"\b{re.escape(name)}\b", text, re.I):
+            mentions.append((match.start(), name))
+    mentions.sort(key=lambda item: item[0])
+
+    ordered_names: list[str] = []
+    seen_names: set[str] = set()
+    for _, name in mentions:
+        key = _ascii_key(name)
+        if key not in seen_names:
+            seen_names.add(key)
+            ordered_names.append(name)
+
+    explicit_patterns = [
+        r"(?:appellation|ava|region)\s*[:\-]?\s*([A-Z][A-Za-zÀ-ÿ0-9'&.\- ]{2,60}?)(?=\s{2,}|\s(?:technical|alcohol|harvest|cases|vineyard|$))",
+        r"\b([A-Z][A-Za-zÀ-ÿ'&.\- ]{2,50}\sAVA)\b",
+    ]
+    explicit = _first_match(explicit_patterns, text)
+    if explicit:
+        explicit = re.sub(r"\s+AVA$", "", explicit, flags=re.I).strip()
+        # If the explicit field names one of our known locations, ensure it is
+        # represented even when formatting prevented the generic scan above.
+        for name in known:
+            if _ascii_key(explicit) == _ascii_key(name):
+                if not any(_ascii_key(existing) == _ascii_key(name) for existing in ordered_names):
+                    ordered_names.insert(0, name)
+                explicit = name
+                break
+
+    broad_hits = [name for name in ordered_names if name in broad_names]
+    narrow_hits = [name for name in ordered_names if name not in broad_names]
+    # Preserve order while de-duplicating.
+    broad_hits = list(dict.fromkeys(broad_hits))
+    narrow_hits = list(dict.fromkeys(narrow_hits))
+
+    broad = broad_hits[0] if broad_hits else ""
+
+    # Two or more distinct narrower AVAs/districts means the finished wine is
+    # multi-area for our single-subregion schema.  Keep the broad AVA only.
+    if len(narrow_hits) >= 2:
+        return broad or (explicit if explicit and explicit in broad_names else ""), "", True
+
+    if broad:
+        return broad, (narrow_hits[0] if len(narrow_hits) == 1 else ""), False
+
+    # No recognized broad AVA.  If a single known narrower area is the only
+    # geography evidence, keep it as the region rather than inventing a parent.
+    if len(narrow_hits) == 1:
+        return narrow_hits[0], "", False
+
+    # Finally preserve an explicit free-text appellation/region when it was not
+    # in the known list.  This keeps the extractor useful beyond our initial CA
+    # test set without guessing a subregion hierarchy.
+    if explicit:
+        return explicit, "", False
+
+    return "", "", False
 
 
 def _extract_abv(text: str) -> float | None:
@@ -924,7 +971,7 @@ def _extract_product_metadata(title: str, page_text: str) -> dict[str, Any]:
     varietal = _extract_varietal(title, page_text)
     graph = _infer_graph_category(varietal, title, page_text)
     general = _infer_general_category(graph, varietal, title)
-    region, subregion = _extract_region(page_text)
+    region, subregion, geography_conflict = _extract_region(page_text)
     alcohol = _extract_abv(page_text)
     cases = _extract_cases(page_text)
     blob = f"{title} {page_text[:2500]}".casefold()
@@ -948,6 +995,7 @@ def _extract_product_metadata(title: str, page_text: str) -> dict[str, Any]:
         "single_vineyard": single,
         "product_tier": tier,
         "availability_status": _availability_status(page_text),
+        "_geography_conflict": geography_conflict,
     }
 
 def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
@@ -971,6 +1019,7 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
         tag.decompose()
     page_text = re.sub(r"\s+", " ", soup_for_text.get_text(" ", strip=True))
     metadata = _extract_product_metadata(title, page_text)
+    geography_conflict = bool(metadata.pop("_geography_conflict", False))
 
     structured = _extract_jsonld(soup, base_url)
     if structured:
@@ -979,6 +1028,8 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
                 offer.vintage = _vintage_from_name(offer.wine) or _vintage_from_name(page_text[:900])
             for field, value in metadata.items():
                 setattr(offer, field, value)
+            if geography_conflict and offer.confidence == "High":
+                offer.confidence = "Moderate"
             # Prefer the visible h1/OG title when JSON-LD is generic.
             if title and (_ascii_key(offer.wine) in {"wine", "product", "shop"} or len(offer.wine) < 4):
                 offer.wine = title
@@ -1013,7 +1064,7 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
             product_url=base_url,
             evidence=evidence[:500],
             extraction_method="Selected product page",
-            confidence="High" if regular is not None else "Moderate",
+            confidence=("Moderate" if geography_conflict else ("High" if regular is not None else "Moderate")),
             **metadata,
         )
     ]

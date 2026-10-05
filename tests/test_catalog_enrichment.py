@@ -91,3 +91,20 @@ def test_plural_vineyard_language_overrides_generic_single_vineyard_phrase():
     assert o.wine == "Chardonnay Nº4"
     assert o.single_vineyard is False
     assert o.availability_status == "Member exclusive"
+
+
+def test_explicit_appellation_does_not_override_multiple_subregions():
+    html = """
+    <html><body>
+    <h1>Blanc Nº9 — 2023</h1>
+    <div>Appellation: Yountville</div>
+    <p>Napa Valley. This Blanc blends Sémillon and Sauvignon Blanc sourced from
+    vineyards in Oak Knoll District and Yountville.</p>
+    <p>Alcohol 13.0%. 2,400 cases produced. $45. Add to cart.</p>
+    </body></html>
+    """
+    offers = _extract_product_page_offers(html, "https://example.com/shop/blanc-2023-9")
+    o = offers[0]
+    assert o.region == "Napa Valley"
+    assert o.subregion == ""
+    assert o.confidence == "Moderate"
