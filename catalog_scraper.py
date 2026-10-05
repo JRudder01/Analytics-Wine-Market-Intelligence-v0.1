@@ -20,6 +20,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
+CATALOG_PARSER_BUILD = "v0.3.24"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
