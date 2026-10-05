@@ -36,6 +36,9 @@ from catalog_scraper import (
     CatalogScanError,
     WineOffer,
     scan_catalog,
+    discover_product_links,
+    scan_selected_product_pages,
+    merge_offers,
     offers_to_rudder_rows,
     USER_AGENT as CATALOG_USER_AGENT,
 )
@@ -77,7 +80,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.13</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.15</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -111,7 +114,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.13 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, and reset-safe screenshot intake.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.15 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -253,7 +256,7 @@ if page == "Pricing Analysis":
             dtc_share = 0.0
         wholesale_net_pct = st.slider("Wholesale net revenue as % of MSRP", 35, 65, 50, 1) / 100
 
-    run = st.button("Generate Rudder Market Analysis", type="primary", use_container_width=True)
+    run = st.button("Generate Market Analysis", type="primary", use_container_width=True)
 
     if run:
         target = {
@@ -285,7 +288,7 @@ if page == "Pricing Analysis":
             st.stop()
 
         st.divider()
-        st.subheader("Rudder pricing recommendation")
+        st.subheader("Pricing recommendation")
         scenario_cols = st.columns(3)
         for col, s in zip(scenario_cols, result["scenarios"]):
             with col:
@@ -343,7 +346,7 @@ if page == "Pricing Analysis":
                 hover_data={"winery": True, "product_tier": True, "comp_reason": True, "similarity_weight": ":.2f"},
                 labels={"price": "Observed price ($)", "winery": "Winery", "product_tier": "Tier"},
             )
-            fig.add_hline(y=result["scenarios"][1]["msrp"], line_dash="dash", annotation_text="Rudder market-aligned")
+            fig.add_hline(y=result["scenarios"][1]["msrp"], line_dash="dash", annotation_text="Market-aligned")
             fig.update_xaxes(dtick=1, tickformat="d")
             fig.update_layout(height=410, margin=dict(l=10, r=10, t=15, b=10))
             st.plotly_chart(fig, use_container_width=True)
@@ -395,7 +398,7 @@ if page == "Pricing Analysis":
         )
 
 elif page == "Data Hub (Admin)":
-    st.subheader("Rudder Wine Data Hub")
+    st.subheader("Wine Data Hub")
     st.caption("Internal data-management layer. Customers do not need to build or maintain comparable sets themselves.")
 
     a, b, c, d = st.columns(4)
@@ -406,23 +409,26 @@ elif page == "Data Hub (Admin)":
 
     st.markdown("### Winery Catalog Scan (Experimental)")
     st.caption(
-        "Paste one public winery shop/catalog page and Rudder will make a user-initiated, low-request scan for "
-        "wine names and prices. This is an experimental admin tool; review the source's terms/permission before wider use."
+        "Paste one public winery shop/catalog page for a user-initiated, low-request scan of wine names and prices. "
+        "If the catalog page exposes individual product links, the tool can list them without opening them; only pages you explicitly select are fetched. "
+        "Review the source's terms/permission before wider use."
     )
-
-    with st.expander("Catalog scan behavior / safeguards", expanded=False):
+    with st.expander("Catalog scan behavior / safeguards"):
         st.markdown(
             f"""
-- **Request User-Agent:** `{CATALOG_USER_AGENT}`
-- **Scope:** the exact pasted page only; Rudder does not automatically follow product links
-- **robots.txt:** checked before the page is fetched; the result is cached in-process for 24 hours
-- **Access controls / rate limits:** HTTP 401, 403, or 429 stops the scan; there is no bypass or automatic retry
-- **Page size:** maximum 2 MB
+- **User-Agent:** `{CATALOG_USER_AGENT}`
+- **Initial scope:** only the exact catalog/shop page you paste is fetched
+- **Product links:** discovered from the already-fetched catalog HTML; they are **not opened automatically**
+- **Optional follow-up:** individual product pages are fetched only after you check them and click **Scan selected product pages**
+- **Request pacing:** selected product pages are fetched sequentially with a short delay; maximum 12 pages per batch
+- **robots.txt:** checked before pages are fetched; the result is cached in-process for 24 hours
+- **Access controls / rate limits:** HTTP 401, 403, or 429 stops that request; there is no bypass or automatic retry
+- **Page size:** maximum 2 MB per fetched HTML page
 - **JavaScript:** not executed
 - **Assets:** images, CSS, fonts, and scripts are not separately downloaded
 - **Database:** scan results are review-only and are **not automatically added** to the wine-comp database
 
-A first scan of a domain may make two requests: `robots.txt` and the exact catalog page. Later scans normally reuse the cached robots result while the app process remains alive.
+A first scan of a domain may make two requests: `robots.txt` and the exact catalog page. Once the robots result is cached, each product page you explicitly select normally adds one HTML request.
 """
         )
 
@@ -460,7 +466,11 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
         )
 
     if catalog_clear_clicked:
-        for key in ["catalog_fetch", "catalog_offers", "catalog_winery_value"]:
+        for key in [
+            "catalog_fetch", "catalog_offers", "catalog_winery_value",
+            "catalog_product_links", "catalog_product_scan_summary",
+            "catalog_product_scan_failures",
+        ]:
             st.session_state.pop(key, None)
         st.session_state.catalog_scan_nonce = catalog_nonce + 1
         st.rerun()
@@ -469,14 +479,19 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
         try:
             with st.spinner("Checking robots.txt and scanning the exact catalog page…"):
                 fetched, catalog_offers = scan_catalog(catalog_url)
+                product_links = discover_product_links(fetched.html, fetched.final_url)
             st.session_state["catalog_fetch"] = fetched
             st.session_state["catalog_offers"] = [o.to_dict() for o in catalog_offers]
+            st.session_state["catalog_product_links"] = [link.to_dict() for link in product_links]
             st.session_state["catalog_winery_value"] = catalog_winery.strip()
+            st.session_state.pop("catalog_product_scan_summary", None)
+            st.session_state.pop("catalog_product_scan_failures", None)
         except CatalogScanError as exc:
             st.error(str(exc))
 
     catalog_fetch = st.session_state.get("catalog_fetch")
     catalog_offers_data = st.session_state.get("catalog_offers", [])
+    catalog_product_links = st.session_state.get("catalog_product_links", [])
     catalog_saved_winery = st.session_state.get("catalog_winery_value", catalog_winery.strip())
 
     if catalog_fetch is not None:
@@ -485,6 +500,80 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
             f"{catalog_fetch.bytes_read / 1024:.0f} KB · {catalog_fetch.robots_status}. "
             "No individual product pages were opened automatically."
         )
+
+    product_scan_summary = st.session_state.get("catalog_product_scan_summary")
+    if product_scan_summary:
+        st.success(product_scan_summary)
+    product_scan_failures = st.session_state.get("catalog_product_scan_failures", [])
+    if product_scan_failures:
+        with st.expander(f"Product-page scan notes ({len(product_scan_failures)})"):
+            for item in product_scan_failures:
+                st.write(f"- {item.get('url', '')}: {item.get('error', 'Unknown issue')}")
+
+    if catalog_product_links:
+        st.markdown("#### Optional product-page follow-up")
+        st.caption(
+            f"Found {len(catalog_product_links)} likely same-site wine product page(s) in the catalog HTML. "
+            "Nothing below has been opened yet. Select only the pages you want to fetch once for price/details."
+        )
+        product_link_df = pd.DataFrame(catalog_product_links)
+        product_link_df.insert(0, "scan", False)
+        product_editor = st.data_editor(
+            product_link_df[["scan", "label", "url", "confidence"]],
+            hide_index=True,
+            use_container_width=True,
+            disabled=["label", "url", "confidence"],
+            column_config={
+                "scan": st.column_config.CheckboxColumn("Scan", help="Fetch this product page one time when you click the button below."),
+                "label": st.column_config.TextColumn("Product / wine"),
+                "url": st.column_config.LinkColumn("Product page"),
+                "confidence": st.column_config.TextColumn("Link confidence"),
+            },
+            key=f"catalog_product_link_editor_{catalog_nonce}",
+        )
+        selected_urls = product_editor.loc[product_editor["scan"].fillna(False), "url"].astype(str).tolist()
+        selected_count = len(selected_urls)
+        st.caption(
+            f"Selected: {selected_count}. Maximum 12 per batch. "
+            "Selected pages are fetched sequentially with a short pause between requests."
+        )
+        if st.button(
+            f"Scan selected product pages ({selected_count})",
+            type="secondary",
+            disabled=selected_count == 0,
+            use_container_width=True,
+            key=f"catalog_product_scan_btn_{catalog_nonce}",
+        ):
+            try:
+                with st.spinner(f"Scanning {selected_count} selected product page(s), one request each…"):
+                    new_offers, failures, fetched_count = scan_selected_product_pages(selected_urls)
+
+                existing_offers = []
+                for row in st.session_state.get("catalog_offers", []):
+                    existing_offers.append(
+                        WineOffer(
+                            wine=str(row.get("wine") or ""),
+                            vintage=str(row.get("vintage") or ""),
+                            regular_price=row.get("regular_price"),
+                            sale_price=row.get("sale_price"),
+                            club_price=row.get("club_price"),
+                            currency=str(row.get("currency") or "USD"),
+                            product_url=str(row.get("product_url") or ""),
+                            evidence=str(row.get("evidence") or ""),
+                            extraction_method=str(row.get("extraction_method") or ""),
+                            confidence=str(row.get("confidence") or "Moderate"),
+                        )
+                    )
+                combined = merge_offers(existing_offers + new_offers)
+                st.session_state["catalog_offers"] = [o.to_dict() for o in combined]
+                st.session_state["catalog_product_scan_summary"] = (
+                    f"Fetched {fetched_count} explicitly selected product page(s). "
+                    f"Added/updated {len(new_offers)} dependable product-price record(s)."
+                )
+                st.session_state["catalog_product_scan_failures"] = failures
+                st.rerun()
+            except CatalogScanError as exc:
+                st.error(str(exc))
 
     if catalog_offers_data:
         st.markdown("#### Detected wine offerings")
@@ -509,8 +598,8 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
             key=f"catalog_editor_{catalog_nonce}",
         )
         st.caption(
-            "Review the rows before using them. Catalog pages can contain banners, bundles, membership prices, "
-            "or non-wine merchandise. The scanner intentionally does not open the product URLs to fill missing details."
+            "Review the rows before using them. Catalog/product pages can contain bundles, member pricing, alternate bottle sizes, "
+            "or non-wine merchandise. Nothing is written to the permanent comp database automatically."
         )
 
         dl1, dl2 = st.columns(2)
@@ -539,31 +628,36 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
                     confidence=str(catalog_row.get("confidence") or "Moderate"),
                 )
             )
-        catalog_rudder_rows = pd.DataFrame(
+        catalog_import_rows = pd.DataFrame(
             offers_to_rudder_rows(reconstructed_catalog_offers, winery=catalog_saved_winery)
         )
         with dl2:
             st.download_button(
-                "Download Rudder-compatible comp CSV",
-                catalog_rudder_rows.to_csv(index=False).encode("utf-8-sig"),
-                file_name="rudder_catalog_comp_import.csv",
+                "Download comp-import CSV",
+                catalog_import_rows.to_csv(index=False).encode("utf-8-sig"),
+                file_name="wine_market_intelligence_catalog_comp_import.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
         st.info(
-            "The Rudder-compatible export is intentionally basic: it carries the observed wine/price/source fields but "
-            "leaves varietal, category, AVA, tier, Estate, and similar attributes blank for later enrichment/review."
+            "The comp-import export is intentionally basic: it carries observed wine/price/source fields but leaves varietal, "
+            "category, AVA, tier, Estate, and similar attributes blank for later enrichment/review."
         )
     elif catalog_fetch is not None:
-        st.warning(
-            "The page was fetched, but no dependable product + price records were found in its static HTML/JSON-LD. "
-            "The shop may be JavaScript-rendered or may only expose details on individual product pages. "
-            "Rudder stops here rather than escalating to browser automation or automatic product-page crawling."
-        )
+        if catalog_product_links:
+            st.info(
+                "No dependable product + price pairs were present on the catalog page itself. "
+                "Likely product pages were discovered above; select only the wines you want to inspect and run the optional follow-up scan."
+            )
+        else:
+            st.warning(
+                "The page was fetched, but no dependable product + price records or likely wine product links were found in its static HTML/JSON-LD. "
+                "The shop may be JavaScript-rendered. The scan ends here rather than escalating to browser automation."
+            )
 
     st.divider()
     st.markdown("### Screenshot Intake")
-    st.caption("Upload screenshots you manually captured from a wine product/shop page. AI extracts visible facts, then Rudder applies our classification rules. Nothing is saved until you review and approve it.")
+    st.caption("Upload screenshots you manually captured from a wine product/shop page. AI extracts visible facts, then the tool applies deterministic classification rules. Nothing is saved until you review and approve it.")
 
     if "vision_intake_nonce" not in st.session_state:
         st.session_state.vision_intake_nonce = 0
@@ -637,7 +731,7 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
             "Source URL",
             key=f"vision_source_url_{vision_nonce}",
             placeholder="https://winery.example/product/...",
-            help="Stored for auditability; Rudder does not fetch this URL during screenshot extraction.",
+            help="Stored for auditability; the tool does not fetch this URL during screenshot extraction.",
         )
     with ss2:
         vision_source_kind = st.selectbox(
@@ -706,7 +800,7 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
             for warning in warnings:
                 st.warning(f"Vision review note: {warning}")
         if extracted.get("estate_evidence") and not proposed.get("estate"):
-            st.info("Estate wording was detected, but Rudder did not mark the finished wine as Estate because the evidence did not clearly designate the whole wine as estate-grown/estate-bottled or include Estate in the wine name.")
+            st.info("Estate wording was detected, but the finished wine was not marked as Estate because the evidence did not clearly designate the whole wine as estate-grown/estate-bottled or include Estate in the wine name.")
 
         with st.expander("Extraction evidence / non-model fields", expanded=False):
             st.write(f"**Overall vision confidence:** {extracted.get('overall_confidence', 'Moderate')}")
@@ -855,7 +949,7 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
     source_counts = all_data.groupby(["source_name", "data_confidence"], dropna=False).size().reset_index(name="Observations")
     st.dataframe(source_counts.rename(columns={"source_name": "Source", "data_confidence": "Confidence"}), use_container_width=True, hide_index=True)
 
-    st.markdown("#### Import a newer Rudder pricing workbook")
+    st.markdown("#### Import a newer pricing workbook")
     wb_upload = st.file_uploader("Paso pricing workbook", type=["xlsx", "xls"], key="rudder_wb")
     if wb_upload is not None:
         try:
@@ -893,7 +987,7 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
                 "graph_category": m_category, "general_category": general, "region": m_region, "subregion": "",
                 "price": m_price, "price_type": m_price_type, "critic": "", "critic_score": np.nan,
                 "cases_produced": np.nan, "alcohol_pct": np.nan, "estate": m_tier == "Estate",
-                "single_vineyard": False, "product_tier": m_tier, "source_name": "Manual Rudder research",
+                "single_vineyard": False, "product_tier": m_tier, "source_name": "Manual research",
                 "source_url": m_source, "price_date": pd.Timestamp.today().date().isoformat(), "data_confidence": "Moderate",
             }])
             manual_check = classify_existing_observation(all_data, new.iloc[0].to_dict())
@@ -983,7 +1077,7 @@ A first scan of a domain may make two requests: `robots.txt` and the exact catal
         ["TTB wine producer permit list", "Live download", "Regional producer context", "No key"],
         ["USDA/NASS CA Grape Crush", "Live download", "Supply / grape economics", "No key"],
         ["NOAA vintage climate", "Prepared next", "Vintage weather adjustment", "Free token"],
-        ["Bottle-level current pricing", "Rudder workbook + manual additions", "Core comparable layer", "No scraping required"],
+        ["Bottle-level current pricing", "Pricing workbook + manual additions", "Core comparable layer", "No scraping required"],
     ], columns=["Source", "Status", "Use", "Credential"])
     st.dataframe(roadmap, use_container_width=True, hide_index=True)
 
@@ -1003,9 +1097,9 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.3.13 approach
+### v0.3.15 approach
 
-Rudder estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
+The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
 **Comparable hierarchy**
 
@@ -1019,10 +1113,10 @@ Rudder estimates a market-supported bottle-price range from a weighted comparabl
 
 **Public market context** is intentionally light-touch and capped at ±4% in v0.2. The current seed uses BLS Wine at Home CPI and California red-wine grape-crush conditions; TTB/USDA raw feeds are collected for expansion, and NOAA vintage-weather enrichment is the next public-data connector.
 
-The model is a market-positioning aid, not a guarantee of demand or sell-through. Winery-specific sales history will be needed before Rudder should make quantitative demand forecasts.
+The model is a market-positioning aid, not a guarantee of demand or sell-through. Winery-specific sales history will be needed before the tool should make quantitative demand forecasts.
 
-**Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by a Rudder administrator. The AI extracts visible facts only; Rudder applies deterministic classification rules; a human must review/edit the proposed row before it is added to the session comp database.
+**Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by an administrator. The AI extracts visible facts only; deterministic classification rules are applied afterward; a human must review/edit the proposed row before it is added to the session comp database.
 
-**Experimental Winery Catalog Scan** makes a user-initiated request only to the exact public catalog/shop page entered by an administrator, after checking `robots.txt`. It does not crawl individual products, execute JavaScript, bypass access controls, or automatically write scan output into the comp database.
+**Experimental Winery Catalog Scan** first makes a user-initiated request only to the exact public catalog/shop page entered by an administrator, after checking `robots.txt`. It can discover same-site product links without opening them; individual product pages are fetched only when explicitly selected by the administrator. It does not execute JavaScript, bypass access controls, retry rate limits automatically, or automatically write scan output into the comp database.
         """
     )

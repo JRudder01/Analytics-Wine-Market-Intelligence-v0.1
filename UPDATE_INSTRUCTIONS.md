@@ -1,12 +1,21 @@
-# v0.3.14 Neutral User-Agent patch
+# Wine Market Intelligence v0.3.15 update
 
-Replace these two root-level files in GitHub:
+Replace these two root-level files in the GitHub repository:
 
 - `app.py`
 - `catalog_scraper.py`
 
-The catalog scanner now sends the neutral User-Agent:
+No requirements, secrets, or database changes are required.
 
-`WineCatalogResearch/0.1 (user-initiated single-page request)`
+## What changed
 
-It does not include Rudder Analytics, but it also does not impersonate Chrome or another human browser. All existing single-page, robots.txt, no-retry, and access-control safeguards remain unchanged.
+- Catalog pages are still fetched only after the administrator pastes a URL and clicks **Scan this catalog page**.
+- The already-downloaded catalog HTML is now inspected for likely same-site wine product links without opening them.
+- Discovered product pages are shown in a review table with checkboxes.
+- Only pages explicitly selected by the administrator are fetched when **Scan selected product pages** is clicked.
+- Maximum 12 selected product pages per batch.
+- Selected product pages are fetched sequentially with a short delay between requests.
+- Existing robots.txt, HTTP 401/403/429, page-size, redirect, and private-network safeguards remain in place.
+- Product-page parsing adds a conservative fallback for pages where the catalog exposes names but not prices.
+- User-facing copy now treats **Rudder Analytics** as the company brand and **Wine Market Intelligence** as the tool; phrases such as “Rudder stops…” were removed.
+- The company name remains in the browser/page title (`Rudder Analytics | Wine Market Intelligence`).

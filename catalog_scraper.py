@@ -68,6 +68,17 @@ class WineOffer:
         return asdict(self)
 
 
+@dataclass
+class ProductLink:
+    label: str
+    url: str
+    context: str
+    confidence: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _ascii_key(value: Any) -> str:
     text = "" if value is None else str(value)
     text = unicodedata.normalize("NFKD", text)
@@ -212,7 +223,7 @@ def fetch_catalog_page(url: str) -> CatalogFetch:
     requested = validate_public_url(url)
     robots, robots_status = _get_robots(requested)
     if robots is not None and not robots.can_fetch(USER_AGENT, requested):
-        raise CatalogScanError("robots.txt disallows this page for Rudder's user agent.")
+        raise CatalogScanError("robots.txt disallows this page for the configured research user agent.")
 
     current = requested
     original_site = _site_key(requested)
@@ -379,12 +390,22 @@ def _classify_prices(text: str) -> tuple[float | None, float | None, float | Non
     matches = list(PRICE_RE.finditer(text))
     for match in matches:
         label = (match.group(1) or "").casefold()
+        # Product pages often put words such as "member pricing" several words
+        # before the dollar value. Read a small amount of surrounding text so
+        # that price type is not determined only by the token immediately
+        # adjacent to the price.
+        prefix = text[max(0, match.start() - 90):match.start()].casefold()
+        # Only carry price-type words from the current sentence/clause so a
+        # member-price sentence does not accidentally label the next visible
+        # retail price as a member price too.
+        local_prefix = re.split(r"[.!?;]\s*", prefix)[-1]
+        context = f"{label} {local_prefix}"
         price = _coerce_price(match.group(2))
         if price is None:
             continue
-        if any(word in label for word in ("club", "member", "membership", "society")):
+        if any(word in context for word in ("club", "member", "membership", "wine society", "preferred pricing")):
             club = price if club is None else min(club, price)
-        elif "sale" in label:
+        elif any(word in context for word in ("sale", "discount", "clearance", "special price", "promotion")):
             sale = price if sale is None else min(sale, price)
         elif regular is None:
             regular = price
@@ -462,6 +483,234 @@ def _extract_html_cards(soup: BeautifulSoup, base_url: str) -> list[WineOffer]:
             )
         )
     return results
+
+
+
+_PRODUCT_PATH_HINTS = ("/shop/", "/product/", "/products/", "/wine/", "/wines/")
+_WINE_CONTEXT_HINTS = (
+    "wine", "cabernet", "chardonnay", "pinot", "syrah", "grenache", "sauvignon",
+    "riesling", "rose", "rosé", "zinfandel", "viognier", "merlot", "blend",
+    "blanc", "rouge", "barbera", "sangiovese", "tempranillo", "vermentino",
+    "albarino", "albariño", "vineyard", "cuvee", "cuvée", "vintage", "napa valley",
+    "paso robles", "sonoma", "carneros", "mountain",
+)
+_NON_WINE_HINTS = (
+    "shirt", "sweatshirt", "hoodie", "hat", "tote", "gift card", "merch", "glassware",
+    "corkscrew", "shipping", "login", "account", "visit", "reservation",
+)
+_SECTION_HEADINGS = {
+    "shop", "wines", "wine", "blends", "single vineyard", "zero zero", "zero-zero",
+    "merch", "merchandise", "gift cards", "gift card",
+}
+
+
+def _nearby_link_container(anchor: Tag) -> Tag:
+    """Return a small ancestor useful for labeling a discovered product link."""
+    chosen = anchor
+    node: Tag | None = anchor
+    for _ in range(5):
+        if node is None or not isinstance(node, Tag):
+            break
+        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True))
+        links = node.find_all("a", href=True)
+        if len(text) <= 850 and len(links) <= 6:
+            chosen = node
+            headings = node.find_all(["h1", "h2", "h3", "h4", "h5"])
+            if len(headings) >= 2:
+                break
+        node = node.parent if isinstance(node.parent, Tag) else None
+    return chosen
+
+
+def _product_link_label(anchor: Tag, container: Tag) -> str:
+    anchor_text = _clean_name(anchor.get_text(" ", strip=True))
+    headings = []
+    for heading in container.find_all(["h1", "h2", "h3", "h4", "h5"]):
+        text = _clean_name(heading.get_text(" ", strip=True))
+        if not text:
+            continue
+        key = _ascii_key(text)
+        if key in _SECTION_HEADINGS:
+            continue
+        if key == _ascii_key(anchor_text):
+            continue
+        headings.append(text)
+
+    # Usually the first non-section heading in a product card is the wine name;
+    # the linked heading often contributes the vintage/release number.
+    base = headings[0] if headings else ""
+    if base and anchor_text:
+        if _ascii_key(anchor_text) not in _ascii_key(base):
+            return _clean_name(f"{base} {anchor_text}")
+        return base
+    return base or anchor_text
+
+
+def discover_product_links(html: str, base_url: str) -> list[ProductLink]:
+    """Discover same-site likely wine product links without fetching them.
+
+    Discovery is performed solely against the already-downloaded catalog HTML.
+    No link returned here is opened until the user explicitly selects it.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    base = urlparse(base_url)
+    base_site = _site_key(base_url)
+    base_path = (base.path or "/").rstrip("/") or "/"
+    found: dict[str, ProductLink] = {}
+
+    for anchor in soup.find_all("a", href=True):
+        raw_href = str(anchor.get("href") or "").strip()
+        if not raw_href or raw_href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        url = urljoin(base_url, raw_href)
+        parsed = urlparse(url)
+        if _site_key(url) != base_site:
+            continue
+        # Fragments are browser-side only. Normalize them away for fetches.
+        normalized_url = parsed._replace(fragment="").geturl()
+        parsed_norm = urlparse(normalized_url)
+        path = (parsed_norm.path or "/").rstrip("/") or "/"
+        if path == base_path:
+            continue
+
+        container = _nearby_link_container(anchor)
+        context = re.sub(r"\s+", " ", container.get_text(" ", strip=True))[:700]
+        label = _product_link_label(anchor, container)
+        combined_key = _ascii_key(f"{label} {context} {path}")
+        if not label:
+            # Human-readable fallback from the URL slug.
+            slug = path.rsplit("/", 1)[-1].replace("-", " ")
+            label = _clean_name(slug.title())
+
+        if any(token in combined_key for token in _NON_WINE_HINTS):
+            continue
+
+        path_hint = any(hint in (path.casefold() + "/") for hint in _PRODUCT_PATH_HINTS)
+        has_vintage = bool(VINTAGE_RE.search(context) or NV_RE.search(context))
+        has_wine_context = any(token in combined_key for token in _WINE_CONTEXT_HINTS)
+        class_text = " ".join(str(x) for x in (container.get("class") or [])) + " " + str(container.get("id") or "")
+        productish_class = any(tok in class_text.casefold() for tok in ("product", "wine", "item", "card"))
+
+        if not path_hint and not (has_vintage and (has_wine_context or productish_class)):
+            continue
+        if not has_vintage and not has_wine_context and not productish_class:
+            continue
+
+        confidence = "High" if path_hint and (has_vintage or has_wine_context) else "Moderate"
+        key = normalized_url.casefold()
+        candidate = ProductLink(
+            label=label[:180],
+            url=normalized_url,
+            context=context,
+            confidence=confidence,
+        )
+        current = found.get(key)
+        if current is None or (current.confidence != "High" and candidate.confidence == "High"):
+            found[key] = candidate
+
+    return sorted(found.values(), key=lambda item: _ascii_key(item.label))
+
+
+def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
+    """Extract an offer from one explicitly selected product page."""
+    soup = BeautifulSoup(html, "html.parser")
+    structured = _extract_jsonld(soup, base_url)
+    if structured:
+        return _dedupe(structured)
+
+    title = ""
+    heading = soup.find("h1")
+    if heading:
+        title = _clean_name(heading.get_text(" ", strip=True))
+    if not title:
+        og = soup.find("meta", attrs={"property": "og:title"})
+        if og and og.get("content"):
+            title = _clean_name(og.get("content"))
+    if not title and soup.title:
+        title = _clean_name(soup.title.get_text(" ", strip=True))
+    if not title:
+        return []
+
+    # Remove navigation/script/style text before price classification.
+    for tag in soup(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+    page_text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+    regular, sale, club = _classify_prices(page_text)
+    if regular is None and sale is None and club is None:
+        return []
+
+    # Evidence remains deliberately short and review-oriented.
+    price_match = PRICE_RE.search(page_text)
+    if price_match:
+        start = max(0, price_match.start() - 180)
+        end = min(len(page_text), price_match.end() + 240)
+        evidence = page_text[start:end]
+    else:
+        evidence = page_text[:420]
+
+    return [
+        WineOffer(
+            wine=title,
+            vintage=_vintage_from_name(title) or _vintage_from_name(page_text[:600]),
+            regular_price=regular,
+            sale_price=sale,
+            club_price=club,
+            currency="USD",
+            product_url=base_url,
+            evidence=evidence[:420],
+            extraction_method="Selected product page",
+            confidence="High" if regular is not None else "Moderate",
+        )
+    ]
+
+
+def merge_offers(offers: list[WineOffer]) -> list[WineOffer]:
+    return _dedupe(offers)
+
+
+def scan_selected_product_pages(
+    urls: list[str], *, delay_seconds: float = 0.9, max_pages: int = 12
+) -> tuple[list[WineOffer], list[dict[str, str]], int]:
+    """Fetch only pages the user explicitly selected, once each, sequentially."""
+    unique_urls = []
+    seen = set()
+    for raw in urls:
+        url = validate_public_url(raw)
+        key = url.casefold()
+        if key not in seen:
+            seen.add(key)
+            unique_urls.append(url)
+    if not unique_urls:
+        raise CatalogScanError("Select at least one product page first.")
+    if len(unique_urls) > max_pages:
+        raise CatalogScanError(
+            f"Select no more than {max_pages} product pages per scan to keep request volume low."
+        )
+    site = _site_key(unique_urls[0])
+    if any(_site_key(url) != site for url in unique_urls):
+        raise CatalogScanError("Selected product pages must all belong to the same winery site.")
+
+    offers: list[WineOffer] = []
+    failures: list[dict[str, str]] = []
+    fetched_count = 0
+    for idx, url in enumerate(unique_urls):
+        try:
+            fetched = fetch_catalog_page(url)
+            fetched_count += 1
+            page_offers = _extract_product_page_offers(fetched.html, fetched.final_url)
+            if not page_offers:
+                # Reuse the catalog parser as a fallback for unusually structured pages.
+                page_offers = extract_catalog_offers(fetched.html, fetched.final_url)
+            if page_offers:
+                offers.extend(page_offers)
+            else:
+                failures.append({"url": url, "error": "No dependable product + price record found."})
+        except CatalogScanError as exc:
+            failures.append({"url": url, "error": str(exc)})
+        if idx < len(unique_urls) - 1 and delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+    return _dedupe(offers), failures, fetched_count
 
 
 def _dedupe(offers: list[WineOffer]) -> list[WineOffer]:
