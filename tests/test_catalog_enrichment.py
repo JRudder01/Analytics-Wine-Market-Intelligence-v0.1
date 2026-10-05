@@ -221,3 +221,101 @@ def test_vinoshipper_feed_conversion():
     assert by_name["Cabernet Sauvignon"].alcohol_pct == 15.58
     assert by_name["Grenache Blanc"].regular_price == 40.0
     assert by_name["Grenache Blanc"].general_category == "White"
+
+
+def test_vinoshipper_nested_vintage_and_varietal_metadata():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {
+        "products": [{
+            "id": 2001,
+            "name": "Better Together",
+            "consumerPrice": 48,
+            "metadata": {
+                "vintage": {"year": 2021},
+                "varietal": {"name": "Zinfandel"},
+                "appellation": {"name": "Paso Robles"},
+            },
+        }]
+    }
+    offers = extract_vinoshipper_feed_offers(
+        payload, producer_id="4112", shop_url="https://vinoshipper.com/shop/915_lincoln"
+    )
+    assert len(offers) == 1
+    o = offers[0]
+    assert o.wine == "Better Together"
+    assert o.vintage == "2021"
+    assert o.varietal == "Zinfandel"
+    assert o.graph_category == "Zinfandel"
+    assert o.general_category == "Red"
+    assert o.confidence == "High"
+
+
+def test_vinoshipper_title_blend_overrides_single_provider_varietal():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {
+        "products": [{
+            "id": 2002,
+            "name": "Cabernet and Merlot Blend",
+            "consumerPrice": 60,
+            "vintageYear": 2021,
+            "varietal": "Merlot",
+            "appellation": "San Luis Obispo County",
+        }]
+    }
+    o = extract_vinoshipper_feed_offers(
+        payload, producer_id="4112", shop_url="https://vinoshipper.com/shop/915_lincoln"
+    )[0]
+    assert o.vintage == "2021"
+    assert "Cabernet Sauvignon" in o.varietal
+    assert "Merlot" in o.varietal
+    assert o.graph_category == "Bordeaux Blend"
+
+
+def test_vinoshipper_explicit_composition_overrides_provider_single_varietal():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {
+        "products": [{
+            "id": 2003,
+            "name": "Distinctive",
+            "consumerPrice": 49,
+            "vintage": 2022,
+            "varietal": "Cabernet Sauvignon",
+            "description": "50% Cabernet Sauvignon, 50% Petite Sirah. Paso Robles red blend.",
+            "appellation": "Paso Robles",
+        }]
+    }
+    o = extract_vinoshipper_feed_offers(
+        payload, producer_id="4112", shop_url="https://vinoshipper.com/shop/915_lincoln"
+    )[0]
+    assert o.vintage == "2022"
+    assert "50% Cabernet Sauvignon" in o.varietal
+    assert "50% Petite Sirah" in o.varietal
+    assert o.graph_category == "Red Blend"
+
+
+def test_vinoshipper_rhone_title_and_spelling_aliases():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {
+        "products": [
+            {"id": 2004, "name": "Le Rhone", "consumerPrice": 56, "vintage": 2021, "appellation": "Paso Robles"},
+            {"id": 2005, "name": "Pino Noir", "consumerPrice": 58, "vintage": 2023, "appellation": "San Luis Obispo Coast"},
+            {"id": 2006, "name": "Petite Verdot", "consumerPrice": 55, "vintage": 2022, "appellation": "Paso Robles"},
+        ]
+    }
+    offers = extract_vinoshipper_feed_offers(
+        payload, producer_id="4112", shop_url="https://vinoshipper.com/shop/915_lincoln"
+    )
+    by_name = {o.wine: o for o in offers}
+    assert by_name["Le Rhone"].graph_category == "Rhône Blend"
+    assert by_name["Pinot Noir"].graph_category == "Pinot Noir"
+    assert by_name["Petit Verdot"].graph_category == "Petit Verdot"
+
+
+def test_vinoshipper_missing_vintage_caps_confidence():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {"products": [{"id": 2007, "name": "Merlot", "consumerPrice": 75, "varietal": "Merlot"}]}
+    o = extract_vinoshipper_feed_offers(
+        payload, producer_id="4112", shop_url="https://vinoshipper.com/shop/915_lincoln"
+    )[0]
+    assert o.vintage == ""
+    assert o.confidence == "Moderate"

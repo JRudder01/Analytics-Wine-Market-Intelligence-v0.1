@@ -269,6 +269,170 @@ def _json_bool(node: dict[str, Any], *keys: str) -> bool | None:
     return None
 
 
+def _json_lookup_deep(node: Any, *keys: str, max_depth: int = 5) -> Any:
+    """Find a named field inside a product object without assuming one feed schema.
+
+    VinoShipper has changed/expanded product-feed shapes over time.  The public
+    feed may place vintage, varietal, appellation, or metadata inside nested
+    objects.  This helper searches only for explicit key aliases; it does not
+    scrape arbitrary numbers or guess from unrelated dates.
+    """
+    wanted = {_ascii_key(k).replace(" ", "") for k in keys}
+
+    def walk(value: Any, depth: int) -> Any:
+        if depth > max_depth:
+            return None
+        if isinstance(value, dict):
+            # Prefer a matching field at the current level before descending.
+            for key, child in value.items():
+                norm = _ascii_key(key).replace(" ", "")
+                if norm in wanted and child not in (None, "", [], {}):
+                    return child
+            for child in value.values():
+                found = walk(child, depth + 1)
+                if found not in (None, "", [], {}):
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = walk(child, depth + 1)
+                if found not in (None, "", [], {}):
+                    return found
+        return None
+
+    return walk(node, 0)
+
+
+def _vintage_from_feed_node(node: dict[str, Any], raw_name: str, description: str = "") -> str:
+    """Return only a defensible wine vintage (or NV) from a provider record."""
+    direct = _json_lookup(
+        node,
+        "vintage", "vintageYear", "vintage_year", "productVintage", "product_vintage",
+        "vintageLabel", "vintageName",
+    )
+    if direct in (None, "", [], {}):
+        direct = _json_lookup_deep(
+            node,
+            "vintage", "vintageYear", "vintage_year", "productVintage", "product_vintage",
+            "vintageLabel", "vintageName",
+        )
+    text = _json_text(direct)
+    m = re.search(r"\b((?:19|20)\d{2})\b", text)
+    if m:
+        return m.group(1)
+    if NV_RE.search(text):
+        return "NV"
+
+    # VinoShipper documents that a defined vintage is prepended to a product
+    # title in its catalog.  Some feed variants expose only a display/title form.
+    for candidate in (raw_name, description):
+        year = _vintage_from_name(candidate)
+        if year:
+            return year
+        if NV_RE.search(candidate or ""):
+            return "NV"
+    return ""
+
+
+_GRAPE_ALIAS_MAP = {
+    "pino noir": "Pinot Noir",
+    "pinot noir": "Pinot Noir",
+    "petite verdot": "Petit Verdot",
+    "petit verdot": "Petit Verdot",
+    "cabernet": "Cabernet Sauvignon",
+    "cab sauv": "Cabernet Sauvignon",
+    "cabernet sauv": "Cabernet Sauvignon",
+    "cab franc": "Cabernet Franc",
+    "petite syrah": "Petite Sirah",
+    "mourvedre": "Mourvèdre",
+    "semillon": "Sémillon",
+    "albarino": "Albariño",
+}
+
+_PRODUCT_LABEL_ALIAS_MAP = {
+    "pino noir": "Pinot Noir",
+    "petite verdot": "Petit Verdot",
+}
+
+
+def _normalize_wine_label_aliases(value: str) -> str:
+    clean = _clean_name(value)
+    exact = _PRODUCT_LABEL_ALIAS_MAP.get(_ascii_key(clean))
+    if exact:
+        return exact
+    # Also fix these provider spelling variants when they occur inside a tiered title.
+    clean = re.sub(r"\bPino Noir\b", "Pinot Noir", clean, flags=re.I)
+    clean = re.sub(r"\bPetite Verdot\b", "Petit Verdot", clean, flags=re.I)
+    return clean
+
+
+def _canonical_grape_name(value: str) -> str:
+    clean = _clean_name(value)
+    key = _ascii_key(clean)
+    return _GRAPE_ALIAS_MAP.get(key, clean)
+
+
+def _normalize_varietal_aliases(value: str) -> str:
+    """Normalize common provider spelling/label aliases without inventing grapes."""
+    text = _clean_name(value)
+    if not text:
+        return ""
+    # Preserve percentages while normalizing the grape phrase following them.
+    pieces = re.split(r"\s*(?:,|/|\+|\band\b)\s*", text, flags=re.I)
+    normalized: list[str] = []
+    for piece in pieces:
+        piece = piece.strip()
+        if not piece:
+            continue
+        m = re.match(r"^(\d{1,3}%\s*)?(.*)$", piece)
+        pct, grape = (m.group(1) or ""), (m.group(2) or "").strip()
+        canonical = _canonical_grape_name(grape)
+        normalized.append(f"{pct}{canonical}".strip())
+    return ", ".join(normalized) if normalized else text
+
+
+def _title_explicit_blend(title: str) -> str:
+    """Extract a simple multi-grape blend stated directly in a product title."""
+    t = _clean_name(title)
+    if not t or "blend" not in t.casefold():
+        return ""
+    body = re.sub(r"\bblend\b.*$", "", t, flags=re.I).strip(" -–—")
+    parts = re.split(r"\s*(?:&|\band\b|/|\+)\s*", body, flags=re.I)
+    grapes: list[str] = []
+    for part in parts:
+        key = _ascii_key(part)
+        if not key:
+            continue
+        canonical = _GRAPE_ALIAS_MAP.get(key)
+        if canonical is None:
+            # Accept full known grape names; reject marketing words.
+            known = _extract_varietal(part, part)
+            canonical = _canonical_grape_name(known) if known else ""
+        if canonical and _ascii_key(canonical) not in {_ascii_key(x) for x in grapes}:
+            grapes.append(canonical)
+    return ", ".join(grapes) if len(grapes) >= 2 else ""
+
+
+def _prefer_explicit_blend(provider_varietal: str, title: str, rich_text: str) -> str:
+    """Prefer explicit multi-grape evidence over a single provider category label."""
+    provider = _normalize_varietal_aliases(provider_varietal)
+    title_blend = _title_explicit_blend(title)
+    inferred = _normalize_varietal_aliases(_extract_varietal(title, rich_text))
+
+    def grape_count(value: str) -> int:
+        if not value:
+            return 0
+        # Percentage lists and comma-separated normalized lists both count.
+        parts = [p for p in re.split(r"\s*,\s*", value) if p.strip()]
+        return len(parts)
+
+    # Explicit title/composition evidence wins when it identifies multiple grapes.
+    if grape_count(title_blend) >= 2:
+        return title_blend
+    if grape_count(inferred) >= 2 and grape_count(provider) <= 1:
+        return inferred
+    return provider or inferred
+
+
 def _looks_like_vinoshipper_product_node(node: dict[str, Any]) -> bool:
     name = _json_lookup(node, "name", "title", "productName", "wineName", "displayName")
     price = _json_lookup(node, "price", "consumerPrice", "retailPrice", "msrp", "unitPrice")
@@ -307,12 +471,19 @@ def extract_vinoshipper_feed_offers(payload: Any, *, producer_id: str, shop_url:
     for node in _vinoshipper_product_nodes(payload):
         raw_name = _json_text(_json_lookup(node, "name", "title", "productName", "wineName", "displayName"))
         if not raw_name:
+            raw_name = _json_text(_json_lookup_deep(node, "productName", "wineName", "displayName", "title"))
+        if not raw_name:
             continue
-        vintage_raw = _json_lookup(node, "vintage", "vintageYear", "year")
-        vintage = _json_text(vintage_raw)
-        if not re.fullmatch(r"(?:19|20)\d{2}", vintage):
-            vintage = _vintage_from_name(raw_name) or ("NV" if NV_RE.search(raw_name) else "")
+
+        description_value = _json_lookup(node, "description", "shortDescription", "productDescription", "notes", "tastingNotes")
+        if description_value in (None, "", [], {}):
+            description_value = _json_lookup_deep(
+                node, "description", "shortDescription", "productDescription", "notes", "tastingNotes"
+            )
+        description = _json_text(description_value)
+        vintage = _vintage_from_feed_node(node, raw_name, description)
         canonical_name = _canonical_wine_name(raw_name, vintage)
+        canonical_name = _normalize_wine_label_aliases(canonical_name)
 
         consumer = _coerce_price(_json_lookup(node, "price", "consumerPrice", "retailPrice", "unitPrice", "currentPrice"))
         msrp = _coerce_price(_json_lookup(node, "msrp", "listPrice", "regularPrice"))
@@ -324,14 +495,32 @@ def extract_vinoshipper_feed_offers(payload: Any, *, producer_id: str, shop_url:
         if regular is None and sale is None and club is None:
             continue
 
-        description = _json_text(_json_lookup(node, "description", "shortDescription", "productDescription", "notes"))
-        varietal = _json_text(_json_lookup(node, "varietal", "variety", "grape", "grapes", "composition", "blend"))
-        appellation = _json_text(_json_lookup(node, "appellation", "ava", "region", "origin"))
+        provider_varietal_value = _json_lookup(
+            node, "varietal", "variety", "grape", "grapes", "composition", "blend",
+            "wineVarietal", "wine_varietal", "varietalName", "productVarietal"
+        )
+        if provider_varietal_value in (None, "", [], {}):
+            provider_varietal_value = _json_lookup_deep(
+                node, "varietal", "variety", "grape", "grapes", "composition", "blend",
+                "wineVarietal", "wine_varietal", "varietalName", "productVarietal"
+            )
+        provider_varietal = _json_text(provider_varietal_value)
+
+        appellation_value = _json_lookup(node, "appellation", "ava", "region", "origin")
+        if appellation_value in (None, "", [], {}):
+            appellation_value = _json_lookup_deep(node, "appellation", "ava", "region", "origin")
+        appellation = _json_text(appellation_value)
+
         alcohol_value = _json_lookup(node, "alcohol", "alcoholLevel", "alcoholPct", "abv", "alcoholByVolume")
+        if alcohol_value in (None, "", [], {}):
+            alcohol_value = _json_lookup_deep(node, "alcohol", "alcoholLevel", "alcoholPct", "abv", "alcoholByVolume")
         abv = _coerce_price(alcohol_value)
         if abv is not None and not (5 <= abv <= 25):
             abv = None
+
         cases_raw = _json_lookup(node, "casesProduced", "caseProduction", "productionCases")
+        if cases_raw in (None, "", [], {}):
+            cases_raw = _json_lookup_deep(node, "casesProduced", "caseProduction", "productionCases")
         cases = None
         if cases_raw not in (None, ""):
             m = re.search(r"[0-9][0-9,]*", str(cases_raw))
@@ -341,12 +530,14 @@ def extract_vinoshipper_feed_offers(payload: Any, *, producer_id: str, shop_url:
                 except ValueError:
                     cases = None
 
-        combined = " ".join(x for x in [raw_name, varietal, appellation, description] if x)
+        # Include explicit feed metadata and description in one conservative evidence
+        # string.  Blend composition in this text can override a generic single-
+        # varietal category supplied by the provider.
+        combined = " ".join(x for x in [raw_name, provider_varietal, appellation, description] if x)
+        varietal = _prefer_explicit_blend(provider_varietal, canonical_name, combined)
         region, subregion, geography_conflict = _extract_region(combined)
         if not region and appellation:
             region = appellation
-        if not varietal:
-            varietal = _extract_varietal(raw_name, combined)
         graph = _infer_graph_category(varietal, canonical_name, combined)
         general = _infer_general_category(graph, varietal, canonical_name)
         estate_flag = bool(_json_bool(node, "estate", "estateGrown", "isEstate") or False)
@@ -375,7 +566,11 @@ def extract_vinoshipper_feed_offers(payload: Any, *, producer_id: str, shop_url:
         else:
             product_url = shop_url
 
-        confidence = "High" if (regular is not None and (varietal or graph) and not geography_conflict) else "Moderate"
+        confidence = (
+            "High"
+            if (regular is not None and bool(vintage) and bool(varietal) and graph != "Other" and not geography_conflict)
+            else "Moderate"
+        )
         results.append(WineOffer(
             wine=canonical_name,
             vintage=vintage,
@@ -1304,6 +1499,7 @@ def _extract_varietal(title: str, text: str) -> str:
         "Vermentino", "Albariño", "Albarino", "Grenache Blanc", "Picpoul Blanc",
         "Roussanne", "Marsanne", "Muscat Canelli", "Malbec", "Petit Verdot",
         "Sémillon", "Semillon", "Chenin Blanc", "Pinot Gris", "Pinot Grigio",
+        "Tannat", "Petite Verdot",
     ]
 
     def grapes_in(fragment: str) -> list[str]:
@@ -1368,14 +1564,20 @@ def _infer_graph_category(varietal: str, title: str, text: str) -> str:
         return "White Blend"
     if sum(term in varietal.casefold() for term in rhone_red) >= 2:
         return "Rhône Blend"
+    # Product names frequently carry style information even when the provider's
+    # single-varietal field is blank or overly broad.
+    title_key = _ascii_key(title)
+    if any(term in title_key for term in ["le rhone", "rhone blend", "rhone red", "rhone"]):
+        return "Rhône Blend"
     if "white blend" in blob or "blanc" in title.casefold():
         return "White Blend"
-    if "red blend" in blob or "proprietary red" in blob:
+    if "red blend" in blob or "proprietary red" in blob or ("blend" in title.casefold() and _infer_general_category("", varietal, title) == "Red"):
         return "Red Blend"
     singles = [
         "Cabernet Sauvignon", "Cabernet Franc", "Chardonnay", "Pinot Noir", "Merlot",
         "Sauvignon Blanc", "Syrah", "Grenache", "Zinfandel", "Petite Sirah", "Viognier",
         "Riesling", "Barbera", "Sangiovese", "Tempranillo", "Vermentino", "Muscat Canelli",
+        "Malbec", "Petit Verdot", "Tannat", "Grenache Blanc", "Albariño", "Albarino",
     ]
     for grape in singles:
         if grape.casefold() in blob:

@@ -1,4 +1,4 @@
-# v0.3.20 update instructions
+# v0.3.21 update instructions
 
 1. Replace root `app.py`.
 2. Replace root `catalog_scraper.py`.
@@ -12,12 +12,20 @@ No changes are required to:
 - GitHub token permissions
 - `data/wine_comps.csv`
 
-## VinoShipper test
+## Recommended repeat test
 
-For `https://vinoshipper.com/shop/915_lincoln`:
+Use the same VinoShipper source:
 
-- First try leaving **VinoShipper producer ID** blank.
-- If the public shell exposes the ID, the Product Feed is used automatically.
-- If not, enter `4112` for the 915 Lincoln test and scan again.
+`https://vinoshipper.com/shop/915_lincoln`
 
-The product-feed call is a documented VinoShipper client/product-feed route; the patch does not add browser automation.
+The app should continue to auto-detect producer `4112` and use the documented Product Feed. After scanning, review especially:
+
+- vintage population
+- `Better Together` varietal/category if provider metadata exposes Zinfandel
+- `Cabernet and Merlot Blend` → Bordeaux Blend
+- `Le Rhone` → Rhône Blend
+- `Pino Noir` → Pinot Noir
+- `Petite Verdot` → Petit Verdot
+- explicit multi-grape compositions overriding a misleading single-varietal provider category
+
+Rows still lacking a defensible vintage/category should be marked `Moderate` rather than `High` confidence.
