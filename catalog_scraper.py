@@ -562,6 +562,190 @@ def _extract_html_cards(soup: BeautifulSoup, base_url: str) -> list[WineOffer]:
 
 
 
+_BLOCK_WINE_HINTS = (
+    "wine", "cabernet", "chardonnay", "pinot", "syrah", "grenache", "sauvignon",
+    "riesling", "rose", "rosé", "zinfandel", "viognier", "merlot", "blend",
+    "blanc", "rouge", "barbera", "sangiovese", "tempranillo", "vermentino",
+    "albarino", "albariño", "malbec", "tannat", "petite sirah", "petit verdot",
+    "roussanne", "marsanne", "mourvedre", "mourvèdre", "vintage", "bottle",
+)
+_BLOCK_NON_WINE_HINTS = (
+    "gift card", "shipping", "merch", "shirt", "hoodie", "hat", "glassware",
+    "reservation", "visit us", "event ticket", "membership signup",
+)
+
+
+def _same_site_product_url(container: Tag, heading: Tag | None, base_url: str) -> str:
+    """Return a same-site product URL when the static block exposes one.
+
+    Catalogs such as marketplace storefronts sometimes render all useful product
+    facts in one static list without a conventional product link. In that case
+    the catalog URL itself is retained as provenance instead of inventing a URL.
+    """
+    anchors: list[Tag] = []
+    if heading is not None:
+        if heading.name == "a" and heading.get("href"):
+            anchors.append(heading)
+        parent_link = heading.find_parent("a", href=True)
+        if isinstance(parent_link, Tag):
+            anchors.append(parent_link)
+    anchors.extend(container.find_all("a", href=True, limit=8))
+    for anchor in anchors:
+        raw = str(anchor.get("href") or "").strip()
+        if not raw or raw.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        url = urljoin(base_url, raw)
+        if _site_key(url) != _site_key(base_url):
+            continue
+        parsed = urlparse(url)
+        return parsed._replace(fragment="").geturl()
+    return base_url
+
+
+def _heading_looks_like_product(title: str, context: str) -> bool:
+    key = _ascii_key(f"{title} {context}")
+    if any(token in key for token in _BLOCK_NON_WINE_HINTS):
+        return False
+    has_vintage = bool(VINTAGE_RE.search(title) or NV_RE.search(title))
+    has_wine_word = any(token in key for token in _BLOCK_WINE_HINTS)
+    has_abv = bool(re.search(r"\b\d{1,2}(?:\.\d+)?\s*%\s*(?:ABV|alcohol)?\b", context, re.I))
+    # A visible vintage plus either wine vocabulary or ABV is a strong generic
+    # product-card signal without relying on a winery/platform-specific class.
+    return (has_vintage and (has_wine_word or has_abv)) or (has_wine_word and has_abv)
+
+
+def _nearest_repeating_product_block(heading: Tag) -> Tag | None:
+    """Find the smallest ancestor that looks like one complete product block."""
+    node: Tag | None = heading
+    best: Tag | None = None
+    for _ in range(8):
+        if node is None or not isinstance(node, Tag):
+            break
+        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True))
+        if len(text) > 2600:
+            break
+        if PRICE_RE.search(text):
+            # Avoid swallowing a large grid containing many neighboring products.
+            headings = [
+                _clean_name(h.get_text(" ", strip=True))
+                for h in node.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+            ]
+            productish = [h for h in headings if _heading_looks_like_product(h, text)]
+            if len(productish) <= 2:
+                best = node
+                # Smallest qualifying ancestor is normally the card/list item.
+                break
+        node = node.parent if isinstance(node.parent, Tag) else None
+    return best
+
+
+def _extract_repeating_product_blocks(soup: BeautifulSoup, base_url: str) -> list[WineOffer]:
+    """Extract static repeating product blocks without requiring product links.
+
+    This is intentionally structure-agnostic. It looks for a product-like heading
+    plus price within the smallest nearby HTML block, then enriches the row from
+    the text already present in that block. It is useful for marketplace/catalog
+    pages that expose the entire wine list in static HTML but do not use the
+    anchor/card patterns handled by ``_extract_html_cards``.
+    """
+    results: list[WineOffer] = []
+    seen_blocks: set[int] = set()
+
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        title = _clean_name(heading.get_text(" ", strip=True))
+        if not title or len(title) < 3 or len(title) > 180:
+            continue
+        block = _nearest_repeating_product_block(heading)
+        if block is None:
+            continue
+        block_id = id(block)
+        if block_id in seen_blocks:
+            continue
+        text = re.sub(r"\s+", " ", block.get_text(" ", strip=True))
+        if not _heading_looks_like_product(title, text):
+            continue
+        if any(token in _ascii_key(text) for token in _BLOCK_NON_WINE_HINTS):
+            continue
+
+        regular, sale, club = _classify_prices(text)
+        if regular is None and sale is None and club is None:
+            continue
+        vintage = _vintage_from_name(title) or _vintage_from_name(text[:700])
+        if not vintage and not NV_RE.search(text[:700]):
+            # For catalog-scale extraction, requiring a visible vintage/NV keeps
+            # generic non-wine merchandise cards from entering the review table.
+            continue
+        canonical_title = _canonical_wine_name(title, vintage)
+        if not canonical_title:
+            continue
+
+        metadata = _extract_product_metadata(title, text)
+        geography_conflict = bool(metadata.pop("_geography_conflict", False))
+        product_url = _same_site_product_url(block, heading, base_url)
+        high_signal = bool(vintage and _extract_abv(text) is not None)
+        confidence = "High" if high_signal and not geography_conflict else "Moderate"
+        results.append(
+            WineOffer(
+                wine=canonical_title,
+                vintage=vintage or "NV",
+                regular_price=regular,
+                sale_price=sale,
+                club_price=club,
+                currency="USD",
+                product_url=product_url,
+                evidence=text[:520],
+                extraction_method="Repeating HTML product block",
+                confidence=confidence,
+                **metadata,
+            )
+        )
+        seen_blocks.add(block_id)
+
+    # Some static catalogs use semantic article/li cards but no heading tags.
+    # Run a conservative second pass only over product-ish containers.
+    for container in soup.find_all(["article", "li", "section", "div"]):
+        class_text = " ".join(str(x) for x in (container.get("class") or [])) + " " + str(container.get("id") or "")
+        if not any(tok in class_text.casefold() for tok in ("product", "wine", "item", "card")):
+            continue
+        if id(container) in seen_blocks:
+            continue
+        text = re.sub(r"\s+", " ", container.get_text(" ", strip=True))
+        if not (30 <= len(text) <= 1800) or not PRICE_RE.search(text):
+            continue
+        if any(token in _ascii_key(text) for token in _BLOCK_NON_WINE_HINTS):
+            continue
+        title_tag = container.find(["h1", "h2", "h3", "h4", "h5", "h6", "strong"])
+        title = _clean_name(title_tag.get_text(" ", strip=True)) if isinstance(title_tag, Tag) else ""
+        if not title or not _heading_looks_like_product(title, text):
+            continue
+        regular, sale, club = _classify_prices(text)
+        if regular is None and sale is None and club is None:
+            continue
+        vintage = _vintage_from_name(title) or _vintage_from_name(text[:700])
+        if not vintage and not NV_RE.search(text[:700]):
+            continue
+        metadata = _extract_product_metadata(title, text)
+        geography_conflict = bool(metadata.pop("_geography_conflict", False))
+        results.append(
+            WineOffer(
+                wine=_canonical_wine_name(title, vintage),
+                vintage=vintage or "NV",
+                regular_price=regular,
+                sale_price=sale,
+                club_price=club,
+                currency="USD",
+                product_url=_same_site_product_url(container, title_tag if isinstance(title_tag, Tag) else None, base_url),
+                evidence=text[:520],
+                extraction_method="Repeating HTML product block",
+                confidence=("Moderate" if geography_conflict else ("High" if _extract_abv(text) is not None else "Moderate")),
+                **metadata,
+            )
+        )
+        seen_blocks.add(id(container))
+
+    return results
+
+
 _PRODUCT_PATH_HINTS = ("/shop/", "/product/", "/products/", "/wine/", "/wines/")
 _WINE_CONTEXT_HINTS = (
     "wine", "cabernet", "chardonnay", "pinot", "syrah", "grenache", "sauvignon",
@@ -711,6 +895,8 @@ def _extract_region(text: str) -> tuple[str, str, bool]:
         "Atlas Peak", "Mount Veeder", "Stags Leap District", "Rutherford", "Oakville",
         "Yountville", "Calistoga", "St. Helena", "Adelaida District", "Willow Creek District",
         "Templeton Gap District", "Santa Margarita Ranch", "York Mountain",
+        "El Pomar District", "Geneseo District", "Creston District", "Estrella District",
+        "San Juan Creek District",
     ]
     broad_names = {
         "Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast",
@@ -783,8 +969,8 @@ def _extract_region(text: str) -> tuple[str, str, bool]:
 
 def _extract_abv(text: str) -> float | None:
     patterns = [
-        r"(?:alcohol|abv)\s*[:\-]?\s*([0-9]{1,2}(?:\.[0-9])?)\s*%?",
-        r"([0-9]{1,2}(?:\.[0-9])?)\s*%\s*(?:alcohol|abv)",
+        r"(?:alcohol|abv)\s*[:\-]?\s*([0-9]{1,2}(?:\.[0-9]{1,3})?)\s*%?",
+        r"([0-9]{1,2}(?:\.[0-9]{1,3})?)\s*%\s*(?:alcohol|abv)",
     ]
     for pattern in patterns:
         m = re.search(pattern, text, re.I)
@@ -1174,8 +1360,9 @@ def _dedupe(offers: list[WineOffer]) -> list[WineOffer]:
 def extract_catalog_offers(html: str, base_url: str) -> list[WineOffer]:
     soup = BeautifulSoup(html, "html.parser")
     structured = _extract_jsonld(soup, base_url)
+    repeating = _extract_repeating_product_blocks(soup, base_url)
     cards = _extract_html_cards(soup, base_url)
-    return _dedupe(structured + cards)
+    return _dedupe(structured + repeating + cards)
 
 
 def scan_catalog(url: str) -> tuple[CatalogFetch, list[WineOffer]]:

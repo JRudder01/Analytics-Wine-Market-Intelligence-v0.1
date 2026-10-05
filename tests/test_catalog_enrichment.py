@@ -108,3 +108,71 @@ def test_explicit_appellation_does_not_override_multiple_subregions():
     assert o.region == "Napa Valley"
     assert o.subregion == ""
     assert o.confidence == "Moderate"
+
+
+def test_repeating_static_catalog_blocks_without_product_links():
+    from catalog_scraper import extract_catalog_offers
+    html = """
+    <html><body>
+      <main>
+        <div class="listing-row">
+          <h3>2021 Malbec</h3>
+          <div>915 Lincoln / California</div>
+          <div>Paso Robles, El Pomar District</div>
+          <div>100% Malbec</div>
+          <div>14.86% ABV</div>
+          <div>$45.00 / 750 mL bottle</div>
+        </div>
+        <div class="listing-row">
+          <h3>2023 Grenache Blanc</h3>
+          <div>915 Lincoln / California</div>
+          <div>Paso Robles, El Pomar District</div>
+          <div>100% Grenache Blanc</div>
+          <div>14% ABV</div>
+          <div>$40.00 / 750 mL bottle</div>
+        </div>
+        <div class="listing-row">
+          <h3>2021 Cabernet Sauvignon</h3>
+          <div>915 Lincoln / California</div>
+          <div>Paso Robles, El Pomar District</div>
+          <div>15.58% ABV</div>
+          <div>$50.00 / 750 mL bottle</div>
+        </div>
+      </main>
+    </body></html>
+    """
+    offers = extract_catalog_offers(html, "https://example.com/shop/915_lincoln")
+    by_name = {o.wine: o for o in offers}
+    assert set(by_name) >= {"Malbec", "Grenache Blanc", "Cabernet Sauvignon"}
+    assert by_name["Malbec"].vintage == "2021"
+    assert by_name["Malbec"].regular_price == 45.0
+    assert by_name["Malbec"].alcohol_pct == 14.86
+    assert by_name["Malbec"].varietal in {"Malbec", "100% Malbec"}
+    assert by_name["Malbec"].region == "Paso Robles"
+    assert by_name["Malbec"].subregion == "El Pomar District"
+    assert by_name["Grenache Blanc"].regular_price == 40.0
+    assert by_name["Grenache Blanc"].general_category == "White"
+    assert by_name["Cabernet Sauvignon"].regular_price == 50.0
+    assert all(o.product_url == "https://example.com/shop/915_lincoln" for o in by_name.values())
+
+
+def test_repeating_static_catalog_sale_price_and_member_status():
+    from catalog_scraper import extract_catalog_offers
+    html = """
+    <html><body>
+      <div class="wine-card">
+        <h3>2018 Cabernet Sauvignon</h3>
+        <p>Members Only</p>
+        <p>15.2% ABV</p>
+        <p><s>$60.00</s> $48.00 / 750 mL bottle</p>
+      </div>
+    </body></html>
+    """
+    offers = extract_catalog_offers(html, "https://example.com/catalog")
+    assert len(offers) == 1
+    o = offers[0]
+    assert o.wine == "Cabernet Sauvignon"
+    assert o.vintage == "2018"
+    assert o.regular_price == 60.0
+    assert o.sale_price == 48.0
+    assert o.availability_status == "Member exclusive"
