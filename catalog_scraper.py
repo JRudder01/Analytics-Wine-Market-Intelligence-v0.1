@@ -101,6 +101,24 @@ def _ascii_key(value: Any) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def _canonical_wine_name(name: str, vintage: str = "") -> str:
+    """Keep the product identity separate from its vintage field."""
+    cleaned = _clean_name(name)
+    if not cleaned:
+        return cleaned
+    year = str(vintage or "").strip()
+    years = [year] if re.fullmatch(r"(?:19|20)\d{2}", year) else []
+    # If no vintage was supplied yet, still strip an obvious terminal year.
+    if not years:
+        m = re.search(r"(?:^|[\s—–-])((?:19|20)\d{2})$", cleaned)
+        if m:
+            years = [m.group(1)]
+    for y in years:
+        cleaned = re.sub(rf"^\s*{re.escape(y)}\s*(?:[—–-]\s*)?", "", cleaned).strip()
+        cleaned = re.sub(rf"\s*(?:[—–-]\s*)?{re.escape(y)}\s*$", "", cleaned).strip()
+    return cleaned.strip(" —–-")
+
+
 def _is_public_ip(addr: str) -> bool:
     ip = ipaddress.ip_address(addr)
     return not (
@@ -680,7 +698,7 @@ def _first_match(patterns: list[str], text: str, flags: int = re.I) -> str:
 
 
 def _extract_region(text: str) -> tuple[str, str]:
-    """Extract an appellation conservatively from visible product-page text."""
+    """Extract a broad AVA and only a single unambiguous narrower district."""
     patterns = [
         r"(?:appellation|ava|region)\s*[:\-]?\s*([A-Z][A-Za-zÀ-ÿ0-9'&.\- ]{2,60}?)(?=\s{2,}|\s(?:technical|alcohol|harvest|cases|vineyard|$))",
         r"\b([A-Z][A-Za-zÀ-ÿ'&.\- ]{2,50}\sAVA)\b",
@@ -697,12 +715,22 @@ def _extract_region(text: str) -> tuple[str, str]:
         "Yountville", "Calistoga", "St. Helena", "Adelaida District", "Willow Creek District",
         "Templeton Gap District", "Santa Margarita Ranch", "York Mountain",
     ]
-    hits = [name for name in known if re.search(rf"\b{re.escape(name)}\b", text, re.I)]
+    hits = []
+    for name in known:
+        if re.search(rf"\b{re.escape(name)}\b", text, re.I):
+            hits.append(name)
     if not hits:
         return "", ""
-    # Broad region first, narrower district as subregion when both are present.
-    broad = next((x for x in hits if x in {"Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast", "Carneros", "Russian River Valley"}), hits[0])
-    sub = next((x for x in hits if x != broad), "")
+
+    broad_names = {
+        "Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast",
+        "Carneros", "Russian River Valley",
+    }
+    broad = next((x for x in hits if x in broad_names), hits[0])
+    narrow_hits = list(dict.fromkeys(x for x in hits if x != broad))
+    # Multiple distinct districts are meaningful evidence of multi-area sourcing; do not
+    # arbitrarily choose one and misstate the wine's provenance.
+    sub = narrow_hits[0] if len(narrow_hits) == 1 else ""
     return broad, sub
 
 
@@ -748,7 +776,18 @@ def _extract_varietal(title: str, text: str) -> str:
         "Petite Sirah", "Viognier", "Riesling", "Barbera", "Sangiovese", "Tempranillo",
         "Vermentino", "Albariño", "Albarino", "Grenache Blanc", "Picpoul Blanc",
         "Roussanne", "Marsanne", "Muscat Canelli", "Malbec", "Petit Verdot",
+        "Sémillon", "Semillon", "Chenin Blanc", "Pinot Gris", "Pinot Grigio",
     ]
+
+    def grapes_in(fragment: str) -> list[str]:
+        found: list[str] = []
+        # Longest-first prevents Grenache from masking Grenache Blanc.
+        for grape in sorted(grape_names, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(grape)}\b", fragment, re.I):
+                key = _ascii_key(grape)
+                if not any(_ascii_key(existing) == key for existing in found):
+                    found.append(grape)
+        return found
 
     # Prefer explicit percentage blends when visible.
     pct_pattern = re.compile(
@@ -761,7 +800,7 @@ def _extract_varietal(title: str, text: str) -> str:
         candidate = re.sub(r"\s+", " ", candidate).strip(" ,;.-")
         if (
             not any(word in candidate.casefold() for word in ["oak", "barrel", "french", "neutral"])
-            and any(g.casefold() in candidate.casefold() for g in grape_names)
+            and grapes_in(candidate)
         ):
             return candidate
 
@@ -769,13 +808,23 @@ def _extract_varietal(title: str, text: str) -> str:
         r"(?:varietal|variety|composition)\s*[:\-]?\s*([^.;]{3,180})",
         r"(?:made from|composed of)\s+([^.;]{3,180})",
     ], text)
-    if explicit and any(g.casefold() in explicit.casefold() for g in grape_names):
+    if explicit and grapes_in(explicit):
         return explicit
 
-    title_hits = [g for g in grape_names if re.search(rf"\b{re.escape(g)}\b", title, re.I)]
+    # Winery prose often states blends narratively rather than in a technical table, e.g.
+    # "Blanc is a blend of Sémillon and Sauvignon Blanc from ...".  Keep only the
+    # grape identities and discard vineyard/source prose that follows them.
+    blend_sentences = re.findall(r"[^.!?]{0,120}\bblend\s+(?:of\s+)?[^.!?]{3,220}", text, re.I)
+    for sentence in blend_sentences:
+        grapes = grapes_in(sentence)
+        if len(grapes) >= 2:
+            return ", ".join(grapes)
+
+    title_hits = grapes_in(title)
     if title_hits:
         return title_hits[0]
     return ""
+
 
 def _infer_graph_category(varietal: str, title: str, text: str) -> str:
     blob = f"{varietal} {title} {text[:1200]}".casefold()
@@ -849,6 +898,28 @@ def _availability_status(text: str) -> str:
     return ""
 
 
+def _infer_single_vineyard(title: str, text: str) -> bool:
+    """Require affirmative single-vineyard evidence and let multi-source wording win."""
+    relevant = f"{title} {text[:5000]}"
+    negative_patterns = [
+        r"\bselect(?:ed)?\s+vineyards\b",
+        r"\bmultiple\s+vineyards\b",
+        r"\bseveral\s+vineyards\b",
+        r"\bvarious\s+vineyards\b",
+        r"\bblend(?:ed)?\s+(?:from|of)\s+[^.]{0,140}\bvineyards\b",
+        r"\bfrom\s+[^.]{0,160}\bvineyards\b",
+        r"\bsourced\s+from\s+[^.]{0,160}\bvineyards\b",
+        r"\bvineyards\s+(?:in|across|throughout)\b",
+        r"\bboth\s+[^.]{0,120}\b(?:vineyard|vineyards)\b",
+    ]
+    if any(re.search(pattern, relevant, re.I) for pattern in negative_patterns):
+        return False
+    return bool(
+        re.search(r"\bsingle[- ]vineyard\b", relevant, re.I)
+        or re.search(r"\b100%\s+[^.]{0,80}\bvineyard\b", relevant, re.I)
+    )
+
+
 def _extract_product_metadata(title: str, page_text: str) -> dict[str, Any]:
     varietal = _extract_varietal(title, page_text)
     graph = _infer_graph_category(varietal, title, page_text)
@@ -863,7 +934,7 @@ def _extract_product_metadata(title: str, page_text: str) -> dict[str, Any]:
         or re.search(r"\bestate[- ]bottled\b", page_text, re.I)
         or re.search(r"\b(?:crafted|made|produced) from[^.]{0,100}\bestate\b", page_text, re.I)
     )
-    single = bool(re.search(r"\bsingle[- ]vineyard\b", page_text, re.I))
+    single = _infer_single_vineyard(title, page_text)
     tier = _infer_tier(title, page_text, estate, cases)
     return {
         "varietal": varietal,
@@ -911,6 +982,7 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
             # Prefer the visible h1/OG title when JSON-LD is generic.
             if title and (_ascii_key(offer.wine) in {"wine", "product", "shop"} or len(offer.wine) < 4):
                 offer.wine = title
+            offer.wine = _canonical_wine_name(offer.wine, offer.vintage)
         return _dedupe(structured)
 
     if not title:
@@ -928,10 +1000,12 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
     else:
         evidence = page_text[:500]
 
+    extracted_vintage = _vintage_from_name(title) or _vintage_from_name(page_text[:900])
+    canonical_title = _canonical_wine_name(title, extracted_vintage)
     return [
         WineOffer(
-            wine=title,
-            vintage=_vintage_from_name(title) or _vintage_from_name(page_text[:900]),
+            wine=canonical_title,
+            vintage=extracted_vintage,
             regular_price=regular,
             sale_price=sale,
             club_price=club,

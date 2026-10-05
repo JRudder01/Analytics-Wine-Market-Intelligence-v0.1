@@ -1,9 +1,20 @@
-# Wine Market Intelligence v0.3.16
+# Rudder Wine Market Intelligence v0.3.17 — Catalog Quality Patch
 
-Catalog enrichment + review/staging update.
+This patch refines the experimental winery catalog/product-page intake after the Ashes & Diamonds review.
 
-This version keeps the existing user-initiated, selected-product-page scan but makes the product-page stage substantially more useful. Selected pages can now provide conservative metadata such as varietal/blend, market/general category, AVA/sub-AVA, ABV, cases produced, Estate/single-vineyard signals, product tier, availability status, and retail/sale/member pricing when those facts are present in the static page HTML or JSON-LD.
+## Changes
 
-Nothing from the catalog scanner is written directly to the permanent database. The administrator reviews/edits rows, selects which ones to stage, then uses the existing **Commit pending changes to GitHub database** control.
+- Narrative blend extraction now recognizes prose such as `blend of Sémillon and Sauvignon Blanc`.
+- Multiple-vineyard language (`select vineyards`, `multiple vineyards`, sourcing from vineyards, etc.) overrides generic single-vineyard wording so the row is not falsely marked Single Vineyard.
+- If more than one distinct narrower AVA/district is present, the broad region is retained and `subregion` is left blank rather than arbitrarily choosing one.
+- Product names are canonicalized so an embedded vintage is removed from the wine name when the vintage already has its own field (for example `Blanc Nº9 — 2023` becomes `Blanc Nº9` + vintage `2023`).
+- Existing low-request scan safeguards, pricing extraction, caching, robots handling, and human review remain unchanged.
 
-The request design remains intentionally low-impact: no site-wide crawl, no JavaScript/browser automation, no CAPTCHA/access-control bypass, no automatic retry on rate limits, and no automatic loading of images/CSS/fonts/scripts.
+## Validation
+
+The included tests cover:
+
+- Ashes & Diamonds-style Cabernet from select vineyards (Single Vineyard = False)
+- true explicit single-vineyard wine remains True
+- Blanc narrative blend extraction and multi-subregion handling
+- plural vineyard wording overrides generic site-wide single-vineyard language
