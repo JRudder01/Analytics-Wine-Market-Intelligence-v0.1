@@ -20,7 +20,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
-CATALOG_PARSER_BUILD = "v0.3.25"
+CATALOG_PARSER_BUILD = "v0.3.26"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
@@ -730,7 +730,7 @@ def _finalize_vinoshipper_offer(offer: WineOffer, producer_id: str = "") -> Wine
         offer.vintage = offer.vintage[:-2]
 
     # Normalize provider spelling before applying product-specific verified facts.
-    offer.varietal = _normalize_varietal_aliases(offer.varietal)
+    offer.varietal = _normalize_varietal_aliases(_trim_metadata_field_tail(offer.varietal))
     key = (pid, _ascii_key(offer.wine), offer.vintage)
     override = _VINOSHIPPER_PRODUCT_OVERRIDES.get(key, {})
     if override.get("varietal"):
@@ -846,6 +846,40 @@ _SINGLE_VARIETAL_CATEGORIES = {
     "Muscat Canelli", "Malbec", "Petit Verdot", "Tannat", "Grenache Blanc", "Albariño",
 }
 
+_NON_WINE_REVIEW_LABELS = (
+    "gift set", "gift box", "gift card", "customize your own",
+    "membership", "shipping", "merchandise", "reservation",
+    "tasting experience", "event ticket",
+)
+_NAV_ONLY_REVIEW_LABELS = {"club only", "winery only", "merch"}
+_ALT_BOTTLE_SIZE_RE = re.compile(
+    r"(?:\b(?:187|200|250|375|500)\s*m[lL]\b|\bhalf[- ]?bottle\b|\bsplit\b|"
+    r"\b(?:1\.?5|3|6|9|12)\s*[lL]\b|\bmagnum\b|\bjeroboam\b|\bdouble magnum\b)",
+    re.I,
+)
+
+
+def _is_reviewable_wine_offer(offer: WineOffer) -> bool:
+    """Keep the review/staging set focused on comparable wine products.
+
+    This is deliberately conservative and generic: obvious navigation/merchandise
+    labels and non-standard bottle-size variants are excluded, while proprietary
+    wine names are retained even when their varietal/category is not yet known.
+    """
+    name = _clean_name(offer.wine)
+    if not name:
+        return False
+    key = _ascii_key(name)
+    if key in _NAV_ONLY_REVIEW_LABELS or any(token in key for token in _NON_WINE_REVIEW_LABELS):
+        return False
+    if _ALT_BOTTLE_SIZE_RE.search(name):
+        return False
+    # A dependable review row needs a price. Link-discovery-only objects never
+    # enter this layer, and no-price rows cannot become pricing comparables.
+    if not any(x is not None for x in (offer.regular_price, offer.sale_price, offer.club_price)):
+        return False
+    return True
+
 
 def _finalize_catalog_offer(offer: WineOffer, provider_id: str = "") -> WineOffer:
     """Canonical last pass used by *every* catalog source before review/staging.
@@ -863,7 +897,7 @@ def _finalize_catalog_offer(offer: WineOffer, provider_id: str = "") -> WineOffe
     if re.fullmatch(r"\d{4}\.0", offer.vintage):
         offer.vintage = offer.vintage[:-2]
 
-    offer.varietal = _normalize_varietal_aliases(offer.varietal)
+    offer.varietal = _normalize_varietal_aliases(_trim_metadata_field_tail(offer.varietal))
     if not offer.varietal and offer.graph_category in _SINGLE_VARIETAL_CATEGORIES:
         offer.varietal = offer.graph_category
 
@@ -892,7 +926,8 @@ def _finalize_catalog_offer(offer: WineOffer, provider_id: str = "") -> WineOffe
 
 
 def finalize_catalog_offers(offers: list[WineOffer], provider_id: str = "") -> list[WineOffer]:
-    return _dedupe([_finalize_catalog_offer(o, provider_id) for o in offers])
+    finalized = [_finalize_catalog_offer(o, provider_id) for o in offers]
+    return _dedupe([o for o in finalized if _is_reviewable_wine_offer(o)])
 
 
 def finalize_catalog_offer_dicts(rows: list[dict[str, Any]], provider_id: str = "") -> list[dict[str, Any]]:
@@ -2039,6 +2074,17 @@ def _extract_cases(text: str) -> int | None:
     return None
 
 
+def _trim_metadata_field_tail(value: str) -> str:
+    """Stop a flattened technical-field value before the next metadata label."""
+    boundary = re.compile(
+        r"\s+(?=(?:appellation|ava|region|alcohol|abv|cases?|case production|"
+        r"wine specs?|technical(?: data)?|awards?|tasting notes?|winemaking|"
+        r"aging|vineyard|harvest|bottling|price|retail|club|member)\b)",
+        re.I,
+    )
+    return boundary.split(re.sub(r"\s+", " ", str(value or "")).strip(), maxsplit=1)[0].strip(" ,;.-")
+
+
 def _extract_varietal(title: str, text: str) -> str:
     grape_names = [
         "Cabernet Sauvignon", "Cabernet Franc", "Chardonnay", "Pinot Noir", "Merlot",
@@ -2060,31 +2106,39 @@ def _extract_varietal(title: str, text: str) -> str:
                     found.append(grape)
         return found
 
-    # Prefer explicit percentage blends when visible.
-    pct_pattern = re.compile(
-        r"((?:\d{1,3}%\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'\- ]{2,35})(?:\s*(?:,|/|\+|and)\s*\d{1,3}%\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'\- ]{2,35}){0,8})",
-        re.I,
-    )
-    matches = pct_pattern.findall(text)
-    if matches:
-        candidate = max(matches, key=len)
-        candidate = re.sub(r"\s+", " ", candidate).strip(" ,;.-")
-        if (
-            not any(word in candidate.casefold() for word in ["oak", "barrel", "french", "neutral"])
-            and grapes_in(candidate)
-        ):
-            return candidate
+    # Percentage composition: pair percentages only with recognized grape names.
+    # This cannot run into the next technical field and ignores oak/aging percentages.
+    grape_alt = "|".join(re.escape(g) for g in sorted(grape_names, key=len, reverse=True))
+    pair_re = re.compile(rf"(\d{{1,3}})\s*%\s*({grape_alt})\b", re.I)
+    pairs: list[tuple[int, str]] = []
+    seen_grapes: set[str] = set()
+    for m in pair_re.finditer(text):
+        pct = int(m.group(1))
+        grape = m.group(2)
+        if not (0 < pct <= 100):
+            continue
+        key = _ascii_key(grape)
+        if key in seen_grapes:
+            continue
+        seen_grapes.add(key)
+        # Preserve the canonical spelling from grape_names when possible.
+        canonical = next((g for g in grape_names if _ascii_key(g) == key), grape)
+        pairs.append((pct, canonical))
+    if pairs:
+        total = sum(pct for pct, _ in pairs)
+        if 50 <= total <= 110:
+            return ", ".join(f"{pct}% {grape}" for pct, grape in pairs)
 
     explicit = _first_match([
         r"(?:varietal|variety|composition)\s*[:\-]?\s*([^.;]{3,180})",
         r"(?:made from|composed of)\s+([^.;]{3,180})",
     ], text)
+    if explicit:
+        explicit = _trim_metadata_field_tail(explicit)
     if explicit and grapes_in(explicit):
         return explicit
 
-    # Winery prose often states blends narratively rather than in a technical table, e.g.
-    # "Blanc is a blend of Sémillon and Sauvignon Blanc from ...".  Keep only the
-    # grape identities and discard vineyard/source prose that follows them.
+    # Winery prose often states blends narratively rather than in a technical table.
     blend_sentences = re.findall(r"[^.!?]{0,120}\bblend\s+(?:of\s+)?[^.!?]{3,220}", text, re.I)
     for sentence in blend_sentences:
         grapes = grapes_in(sentence)
@@ -2095,11 +2149,9 @@ def _extract_varietal(title: str, text: str) -> str:
     if title_hits:
         return title_hits[0]
 
-    # A product name may be a proprietary/vineyard label while the opening prose
-    # plainly identifies one grape (e.g. “Vineyard II ... Cabernet Sauvignon”).
-    # Accept a single unambiguous grape from the first part of the product copy;
-    # if multiple grapes occur, leave varietal blank unless a blend rule above
-    # already captured them.
+    # A proprietary/vineyard label may still identify one unambiguous grape in
+    # the opening technical copy. Multiple grapes are left blank unless a blend
+    # rule above captured them.
     body_hits = grapes_in(text[:1800])
     if len(body_hits) == 1:
         return body_hits[0]
@@ -2172,14 +2224,45 @@ def _infer_tier(title: str, text: str, estate: bool, cases: int | None) -> str:
 
 
 def _availability_status(text: str) -> str:
+    """Return an availability state only when the page text is unambiguous.
+
+    Many commerce templates render every possible button/state label in the HTML
+    (for example Sold Out + Back Ordered + Add to Cart). A static parser cannot
+    know which hidden control is active, so contradictory signals intentionally
+    resolve to blank rather than a false status.
+    """
     blob = text.casefold()
-    if any(k in blob for k in ["sold out", "out of stock"]):
-        return "Sold out"
-    if any(k in blob for k in ["member exclusive", "members only", "member-only"]):
+    sold = any(k in blob for k in ["sold out", "out of stock"] )
+    wait = any(k in blob for k in ["waitlist", "join waitlist"] )
+    back_order = any(k in blob for k in ["back ordered", "backordered", "back-order"] )
+    available = any(k in blob for k in ["add to cart", "add to basket", "buy", "purchase", "in stock"] )
+    member = any(k in blob for k in ["member exclusive", "members only", "member-only", "club only"] )
+    winery_only = "winery only" in blob
+
+    # Contradictory commerce-template states are not dependable from static HTML.
+    core_states = sum(bool(x) for x in (sold, wait, back_order, available))
+    if core_states > 1:
+        return ""
+    if member and winery_only:
+        return ""
+
+    if member:
+        # Member-exclusive products may still show Add to Cart for authenticated
+        # members; exclusivity is the more informative status.
+        if sold or wait or back_order:
+            return ""
         return "Member exclusive"
-    if any(k in blob for k in ["waitlist", "join waitlist"]):
+    if winery_only:
+        if sold or wait or back_order:
+            return ""
+        return "Winery only"
+    if sold:
+        return "Sold out"
+    if wait:
         return "Waitlist"
-    if any(k in blob for k in ["add to cart", "buy", "purchase", "in stock"]):
+    if back_order:
+        return "Back ordered"
+    if available:
         return "Available"
     return ""
 

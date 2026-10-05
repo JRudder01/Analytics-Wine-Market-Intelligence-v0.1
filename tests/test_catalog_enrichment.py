@@ -598,3 +598,95 @@ def test_universal_finalizer_applies_to_non_provider_serialized_rows():
     assert o["varietal"] == "Cabernet Sauvignon"
     assert o["region"] == "Napa Valley"
     assert o["subregion"] == "Diamond Mountain"
+
+
+def test_percent_composition_stops_at_next_metadata_field():
+    html = """
+    <html><body>
+      <h1>2024 Côtes du Rôbles Rouge</h1>
+      <div>Wine Specs</div>
+      <div>Varietal</div><div>56% Grenache, 38% Syrah, 6% Mourvedre</div>
+      <div>Appellation</div><div>Paso Robles, Adelaida District</div>
+      <div>Alcohol</div><div>13.9%</div>
+      <div>$40</div><div>Add to Cart</div>
+    </body></html>
+    """
+    offers = _extract_product_page_offers(html, "https://example.com/product/rouge")
+    assert len(offers) == 1
+    o = offers[0]
+    assert o.varietal == "56% Grenache, 38% Syrah, 6% Mourvèdre"
+    assert "Appellation" not in o.varietal
+    assert o.graph_category == "Rhône Blend"
+    assert o.region == "Paso Robles"
+    assert o.subregion == "Adelaida District"
+
+
+def test_single_varietal_field_stops_at_appellation_label():
+    html = """
+    <html><body>
+      <h1>2023 Vineyard Selection Cabernet</h1>
+      <div>Varietal 100% Cabernet Sauvignon Appellation Paso Robles Alcohol 13.9%</div>
+      <div>$30</div><div>Buy</div>
+    </body></html>
+    """
+    offers = _extract_product_page_offers(html, "https://example.com/product/vbcab")
+    assert len(offers) == 1
+    assert offers[0].varietal == "100% Cabernet Sauvignon"
+    assert offers[0].graph_category == "Cabernet Sauvignon"
+
+
+def test_contradictory_template_availability_is_left_blank():
+    html = """
+    <html><body>
+      <h1>2024 Reserve Chardonnay</h1>
+      <p>Chardonnay. Paso Robles. Alcohol 13.8%.</p>
+      <div>$48</div>
+      <div>Sold Out</div><div>Back Ordered</div><div>Add to Cart</div>
+    </body></html>
+    """
+    offers = _extract_product_page_offers(html, "https://example.com/product/chardonnay")
+    assert len(offers) == 1
+    assert offers[0].availability_status == ""
+
+
+def test_member_exclusive_can_still_be_buyable_without_false_conflict():
+    html = """
+    <html><body>
+      <h1>2025 Chardonnay</h1>
+      <p>Member Exclusive. Chardonnay. Napa Valley. Alcohol 12.4%.</p>
+      <div>$50</div><div>Add to Cart</div>
+    </body></html>
+    """
+    offers = _extract_product_page_offers(html, "https://example.com/product/chardonnay")
+    assert len(offers) == 1
+    assert offers[0].availability_status == "Member exclusive"
+
+
+def test_review_gate_excludes_merch_navigation_and_nonstandard_bottle_sizes():
+    from catalog_scraper import WineOffer, finalize_catalog_offers
+
+    def offer(name: str) -> WineOffer:
+        return WineOffer(
+            wine=name,
+            vintage="2025",
+            regular_price=20.0,
+            sale_price=None,
+            club_price=None,
+            currency="USD",
+            product_url="https://example.com/shop/item",
+            evidence="",
+            extraction_method="HTML card",
+            confidence="Moderate",
+        )
+
+    finalized = finalize_catalog_offers([
+        offer("Customize Your Own 2 Bottle Gift Set"),
+        offer("Club Only"),
+        offer("Winery Only"),
+        offer("Full Boar White Blend 375 ML"),
+        offer("Cabernet Sauvignon 1.5 L Magnum"),
+        offer("Vintage of Valor"),  # proprietary wine name must survive
+        offer("Cabernet Sauvignon"),
+    ])
+    names = {o.wine for o in finalized}
+    assert names == {"Vintage of Valor", "Cabernet Sauvignon"}

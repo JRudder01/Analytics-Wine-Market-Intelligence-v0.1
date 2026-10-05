@@ -85,7 +85,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.24</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.26</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -119,7 +119,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.24 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.26 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -450,7 +450,7 @@ The goal is minimal request volume and explicit human control rather than site-w
         for _key in [
             "catalog_fetch", "catalog_offers", "catalog_winery_value",
             "catalog_product_links", "catalog_product_scan_summary",
-            "catalog_product_scan_failures",
+            "catalog_product_scan_failures", "catalog_selected_offers",
         ]:
             st.session_state.pop(_key, None)
         st.session_state["catalog_session_parser_build"] = CATALOG_PARSER_BUILD
@@ -525,7 +525,7 @@ The goal is minimal request volume and explicit human control rather than site-w
         for key in [
             "catalog_fetch", "catalog_offers", "catalog_winery_value",
             "catalog_product_links", "catalog_product_scan_summary",
-            "catalog_product_scan_failures",
+            "catalog_product_scan_failures", "catalog_selected_offers",
         ]:
             st.session_state.pop(key, None)
         st.session_state.catalog_scan_nonce = catalog_nonce + 1
@@ -540,6 +540,10 @@ The goal is minimal request volume and explicit human control rather than site-w
             st.session_state["catalog_offers"] = [o.to_dict() for o in catalog_offers]
             st.session_state["catalog_product_links"] = [link.to_dict() for link in product_links]
             st.session_state["catalog_winery_value"] = catalog_winery.strip()
+            # A fresh catalog scan starts a fresh review session. Catalog-level
+            # candidates remain visible until the user explicitly scans product
+            # pages; once they do, only those selected/enriched pages are reviewed.
+            st.session_state.pop("catalog_selected_offers", None)
             st.session_state.pop("catalog_product_scan_summary", None)
             st.session_state.pop("catalog_product_scan_failures", None)
         except CatalogScanError as exc:
@@ -636,9 +640,13 @@ The goal is minimal request volume and explicit human control rather than site-w
                 with st.spinner(f"Scanning {selected_count} selected product page(s)…"):
                     new_offers, failures, fetched_count = scan_selected_product_pages(selected_urls)
 
-                existing_offers = []
-                for row in st.session_state.get("catalog_offers", []):
-                    existing_offers.append(
+                # Keep catalog-level candidates separate from explicitly fetched
+                # product pages. Once follow-up is used, the review table should
+                # contain only selected/enriched pages (plus any earlier selected
+                # pages from this same review session), never the entire catalog.
+                existing_selected = []
+                for row in st.session_state.get("catalog_selected_offers", []):
+                    existing_selected.append(
                         WineOffer(
                             wine=str(row.get("wine") or ""),
                             vintage=str(row.get("vintage") or ""),
@@ -664,8 +672,10 @@ The goal is minimal request volume and explicit human control rather than site-w
                             provider_id=str(row.get("provider_id") or provider_id or ""),
                         )
                     )
-                combined = merge_offers(existing_offers + new_offers)
-                st.session_state["catalog_offers"] = [o.to_dict() for o in combined]
+                combined = merge_offers(existing_selected + new_offers)
+                selected_payload = [o.to_dict() for o in combined]
+                st.session_state["catalog_selected_offers"] = selected_payload
+                st.session_state["catalog_offers"] = selected_payload
                 st.session_state["catalog_product_scan_summary"] = (
                     f"Processed {fetched_count} explicitly selected product page(s). "
                     f"Added/updated {len(new_offers)} dependable product record(s) with price/metadata where visible."
@@ -677,6 +687,10 @@ The goal is minimal request volume and explicit human control rather than site-w
 
     if catalog_offers_data:
         st.markdown("#### Review extracted product details")
+        if st.session_state.get("catalog_selected_offers"):
+            st.caption(
+                "Product-page follow-up is active: this review table contains only explicitly selected product pages from this scan session."
+            )
         catalog_df = pd.DataFrame(catalog_offers_data)
         for col, default in {
             "varietal": "", "graph_category": "", "general_category": "", "region": "", "subregion": "",
@@ -1270,7 +1284,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.3.24 approach
+### v0.3.26 approach
 
 The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 

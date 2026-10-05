@@ -1,18 +1,23 @@
-# Update instructions — v0.3.25
+# Update instructions — v0.3.26
 
 Replace these files in the repository root:
 
-1. `app.py`
-2. `catalog_scraper.py`
+- `app.py`
+- `catalog_scraper.py`
 
 Recommended test update:
 
-3. `tests/test_catalog_enrichment.py`
+- `tests/test_catalog_enrichment.py`
 
-No changes are required to `requirements.txt`, Streamlit secrets, GitHub permissions, or `data/wine_comps.csv`.
+No changes are required to:
+
+- `requirements.txt`
+- Streamlit secrets
+- GitHub token/permissions
+- `data/wine_comps.csv`
 
 After Streamlit redeploys, confirm the Data Hub shows:
 
-`Catalog parser build: v0.3.25`
+`Catalog parser build: v0.3.26`
 
-The new build automatically invalidates stale derived catalog scan rows from earlier parser builds. Re-run the A&D catalog scan and select the same regression products; no manual cache/session cleanup should be necessary beyond the normal scan workflow.
+Then click **Clear catalog scan** once and rerun the Eberle 5-product test. The review table should contain only those five selected product pages.
