@@ -27,6 +27,8 @@ MAX_REDIRECTS = 3
 
 _ROBOTS_CACHE: dict[str, tuple[float, RobotFileParser | None, str]] = {}
 _PAGE_CACHE: dict[str, tuple[float, str, str, str, str]] = {}  # ts, html, content_type, etag, last_modified
+_JSON_CACHE: dict[str, tuple[float, Any]] = {}
+VINOSHIPPER_HOSTS = {"vinoshipper.com", "www.vinoshipper.com"}
 
 PRICE_RE = re.compile(
     r"(?:(retail|msrp|regular|list|sale|club|member|membership|wine\s+society)\s*(?:price)?\s*[:\-]?\s*)?"
@@ -52,6 +54,9 @@ class CatalogFetch:
     robots_status: str
     request_note: str = "network fetch"
     user_agent: str = USER_AGENT
+    provider: str = ""
+    provider_note: str = ""
+    provider_requests: int = 0
 
 
 @dataclass
@@ -118,6 +123,295 @@ def _canonical_wine_name(name: str, vintage: str = "") -> str:
         cleaned = re.sub(rf"\s*(?:[—–-]\s*)?{re.escape(y)}\s*$", "", cleaned).strip()
     return cleaned.strip(" —–-")
 
+
+
+def is_vinoshipper_url(url: str) -> bool:
+    try:
+        host = (urlparse(str(url or "")).hostname or "").casefold()
+    except Exception:
+        return False
+    return host in VINOSHIPPER_HOSTS or host.endswith(".vinoshipper.com")
+
+
+def _producer_id_from_url(url: str) -> str:
+    """Extract a VinoShipper producer/winery id when the pasted URL already exposes one."""
+    text = str(url or "")
+    patterns = [
+        r"/api/v3/feeds/vs/(\d+)(?:/|$)",
+        r"[?&](?:producerId|producer_id|wineryId|winery_id|id)=(\d+)(?:&|$)",
+        r"filters(?:%5B|\[)1(?:%5D|\])\.?(?:value|%2Evalue)?(?:=|%3D)(\d+)",
+        r"filters%5B1%5D\.value=(\d+)",
+        r"filters\[1\]\.value=(\d+)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def infer_vinoshipper_producer_id(html: str, url: str = "") -> str:
+    """Best-effort producer-id discovery from VinoShipper's public shop shell.
+
+    VinoShipper's client components need a producer/account id. Different
+    generations of their embed code have used slightly different names, so we
+    accept several explicit configuration forms but never guess from unrelated
+    page numbers.
+    """
+    url_id = _producer_id_from_url(url)
+    if url_id:
+        return url_id
+    text = str(html or "")
+    patterns = [
+        r"Vinoshipper\.init\(\s*[\"']?(\d+)",
+        r"data-vs-(?:account|producer|winery)-id\s*=\s*[\"'](\d+)[\"']",
+        r"[\"'](?:producerId|producerID|producer_id|accountId|accountID|account_id|wineryId|wineryID|winery_id)[\"']\s*[:=]\s*[\"']?(\d+)",
+        r"/api/v3/feeds/vs/(\d+)/products",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _json_headers() -> dict[str, str]:
+    return {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.8",
+        "Connection": "close",
+    }
+
+
+def _fetch_public_json(url: str) -> Any:
+    """Fetch one public JSON feed request with the same conservative controls."""
+    target = validate_public_url(url)
+    now = time.time()
+    cached = _JSON_CACHE.get(target.casefold())
+    if cached and now - cached[0] < PAGE_CACHE_TTL_SECONDS:
+        return cached[1]
+    try:
+        response = requests.get(
+            target,
+            headers=_json_headers(),
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+            stream=True,
+        )
+    except requests.RequestException as exc:
+        raise CatalogScanError(f"Provider feed request failed: {exc}") from exc
+    if response.status_code in {301, 302, 303, 307, 308}:
+        raise CatalogScanError("Provider feed redirected unexpectedly; scan stopped.")
+    if response.status_code in {401, 403}:
+        raise CatalogScanError(
+            f"The provider feed returned HTTP {response.status_code}; the tool will not bypass it."
+        )
+    if response.status_code == 429:
+        raise CatalogScanError("The provider feed returned HTTP 429; the tool will not retry automatically.")
+    if response.status_code >= 400:
+        raise CatalogScanError(f"The provider feed returned HTTP {response.status_code}.")
+    content_type = (response.headers.get("Content-Type") or "").casefold()
+    if "json" not in content_type and content_type:
+        raise CatalogScanError(f"The provider feed returned {content_type.split(';',1)[0]!r}, not JSON.")
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > MAX_HTML_BYTES:
+            raise CatalogScanError("The provider feed exceeded the 2 MB safety limit.")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    try:
+        payload = json.loads(raw.decode(response.encoding or "utf-8", errors="replace"))
+    except Exception as exc:
+        raise CatalogScanError("The provider feed returned invalid JSON.") from exc
+    _JSON_CACHE[target.casefold()] = (now, payload)
+    return payload
+
+
+def _json_lookup(node: dict[str, Any], *keys: str) -> Any:
+    wanted = {_ascii_key(k).replace(" ", "") for k in keys}
+    for key, value in node.items():
+        norm = _ascii_key(key).replace(" ", "")
+        if norm in wanted and value not in (None, ""):
+            return value
+    return None
+
+
+def _json_text(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, dict):
+        for key in ("name", "title", "label", "value", "description"):
+            found = _json_lookup(value, key)
+            if found not in (None, ""):
+                return _json_text(found)
+        return " ".join(_json_text(v) for v in value.values() if _json_text(v))
+    if isinstance(value, list):
+        return ", ".join(x for x in (_json_text(v) for v in value) if x)
+    return _clean_name(value)
+
+
+def _json_bool(node: dict[str, Any], *keys: str) -> bool | None:
+    value = _json_lookup(node, *keys)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    key = _ascii_key(value)
+    if key in {"true", "yes", "1", "y"}:
+        return True
+    if key in {"false", "no", "0", "n"}:
+        return False
+    return None
+
+
+def _looks_like_vinoshipper_product_node(node: dict[str, Any]) -> bool:
+    name = _json_lookup(node, "name", "title", "productName", "wineName", "displayName")
+    price = _json_lookup(node, "price", "consumerPrice", "retailPrice", "msrp", "unitPrice")
+    product_id = _json_lookup(node, "id", "productId", "wineId")
+    return bool(name and (price is not None or product_id is not None))
+
+
+def _vinoshipper_product_nodes(payload: Any) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for node in _iter_json_nodes(payload):
+        if _looks_like_vinoshipper_product_node(node):
+            nodes.append(node)
+    # Prefer the deepest/product-specific nodes and de-dupe by product id/name.
+    unique: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        product_id = _json_text(_json_lookup(node, "id", "productId", "wineId"))
+        name = _json_text(_json_lookup(node, "name", "title", "productName", "wineName", "displayName"))
+        key = product_id or _ascii_key(name)
+        if not key:
+            continue
+        current = unique.get(key)
+        # Keep the richer object if duplicates occur in nested wrappers.
+        if current is None or len(node) > len(current):
+            unique[key] = node
+    return list(unique.values())
+
+
+def extract_vinoshipper_feed_offers(payload: Any, *, producer_id: str, shop_url: str) -> list[WineOffer]:
+    """Convert the documented VinoShipper product feed into editable WineOffer rows.
+
+    Field names have varied across versions, so extraction intentionally accepts
+    several documented/common aliases and leaves uncertain fields blank instead
+    of guessing.
+    """
+    results: list[WineOffer] = []
+    for node in _vinoshipper_product_nodes(payload):
+        raw_name = _json_text(_json_lookup(node, "name", "title", "productName", "wineName", "displayName"))
+        if not raw_name:
+            continue
+        vintage_raw = _json_lookup(node, "vintage", "vintageYear", "year")
+        vintage = _json_text(vintage_raw)
+        if not re.fullmatch(r"(?:19|20)\d{2}", vintage):
+            vintage = _vintage_from_name(raw_name) or ("NV" if NV_RE.search(raw_name) else "")
+        canonical_name = _canonical_wine_name(raw_name, vintage)
+
+        consumer = _coerce_price(_json_lookup(node, "price", "consumerPrice", "retailPrice", "unitPrice", "currentPrice"))
+        msrp = _coerce_price(_json_lookup(node, "msrp", "listPrice", "regularPrice"))
+        sale = _coerce_price(_json_lookup(node, "salePrice", "discountPrice", "promotionalPrice"))
+        club = _coerce_price(_json_lookup(node, "clubPrice", "memberPrice", "membershipPrice"))
+        regular = msrp or consumer
+        if sale is None and msrp is not None and consumer is not None and consumer < msrp:
+            sale = consumer
+        if regular is None and sale is None and club is None:
+            continue
+
+        description = _json_text(_json_lookup(node, "description", "shortDescription", "productDescription", "notes"))
+        varietal = _json_text(_json_lookup(node, "varietal", "variety", "grape", "grapes", "composition", "blend"))
+        appellation = _json_text(_json_lookup(node, "appellation", "ava", "region", "origin"))
+        alcohol_value = _json_lookup(node, "alcohol", "alcoholLevel", "alcoholPct", "abv", "alcoholByVolume")
+        abv = _coerce_price(alcohol_value)
+        if abv is not None and not (5 <= abv <= 25):
+            abv = None
+        cases_raw = _json_lookup(node, "casesProduced", "caseProduction", "productionCases")
+        cases = None
+        if cases_raw not in (None, ""):
+            m = re.search(r"[0-9][0-9,]*", str(cases_raw))
+            if m:
+                try:
+                    cases = int(m.group(0).replace(",", ""))
+                except ValueError:
+                    cases = None
+
+        combined = " ".join(x for x in [raw_name, varietal, appellation, description] if x)
+        region, subregion, geography_conflict = _extract_region(combined)
+        if not region and appellation:
+            region = appellation
+        if not varietal:
+            varietal = _extract_varietal(raw_name, combined)
+        graph = _infer_graph_category(varietal, canonical_name, combined)
+        general = _infer_general_category(graph, varietal, canonical_name)
+        estate_flag = bool(_json_bool(node, "estate", "estateGrown", "isEstate") or False)
+        single_flag = _json_bool(node, "singleVineyard", "isSingleVineyard")
+        single_vineyard = bool(single_flag) if single_flag is not None else _infer_single_vineyard(canonical_name, combined)
+        tier = _infer_tier(canonical_name, combined, estate_flag, cases)
+
+        member_only = _json_bool(node, "membersOnly", "memberOnly", "clubOnly", "clubMembersOnly")
+        sold_out = _json_bool(node, "soldOut", "isSoldOut")
+        archived = _json_bool(node, "archived", "isArchived")
+        if member_only:
+            availability = "Member exclusive"
+        elif sold_out:
+            availability = "Sold out"
+        elif archived:
+            availability = "Archived"
+        else:
+            availability = _availability_status(combined) or "Available"
+
+        product_id = _json_text(_json_lookup(node, "id", "productId", "wineId"))
+        product_url = _json_text(_json_lookup(node, "url", "productUrl", "webUrl", "link"))
+        if product_url:
+            product_url = urljoin(shop_url, product_url)
+        elif product_id:
+            product_url = f"https://vinoshipper.com/api/v3/feeds/vs/{producer_id}/products/{product_id}"
+        else:
+            product_url = shop_url
+
+        confidence = "High" if (regular is not None and (varietal or graph) and not geography_conflict) else "Moderate"
+        results.append(WineOffer(
+            wine=canonical_name,
+            vintage=vintage,
+            regular_price=regular,
+            sale_price=sale,
+            club_price=club,
+            currency="USD",
+            product_url=product_url,
+            evidence=(description or combined)[:520],
+            extraction_method="VinoShipper Product Feed",
+            confidence=confidence,
+            varietal=varietal,
+            graph_category=graph,
+            general_category=general,
+            region=region,
+            subregion=subregion,
+            alcohol_pct=abv,
+            cases_produced=cases,
+            estate=estate_flag,
+            single_vineyard=single_vineyard,
+            product_tier=tier,
+            availability_status=availability,
+        ))
+    return _dedupe(results)
+
+
+def fetch_vinoshipper_product_feed(producer_id: str, shop_url: str) -> list[WineOffer]:
+    pid = str(producer_id or "").strip()
+    if not re.fullmatch(r"\d+", pid):
+        raise CatalogScanError("Enter a numeric VinoShipper producer ID.")
+    endpoint = f"https://vinoshipper.com/api/v3/feeds/vs/{pid}/products"
+    payload = _fetch_public_json(endpoint)
+    offers = extract_vinoshipper_feed_offers(payload, producer_id=pid, shop_url=shop_url)
+    if not offers:
+        raise CatalogScanError("VinoShipper's product feed returned no dependable priced wine records.")
+    return offers
 
 def _is_public_ip(addr: str) -> bool:
     ip = ipaddress.ip_address(addr)
@@ -1365,8 +1659,52 @@ def extract_catalog_offers(html: str, base_url: str) -> list[WineOffer]:
     return _dedupe(structured + repeating + cards)
 
 
-def scan_catalog(url: str) -> tuple[CatalogFetch, list[WineOffer]]:
-    fetched = fetch_catalog_page(url)
+def scan_catalog(url: str, *, provider_id: str = "") -> tuple[CatalogFetch, list[WineOffer]]:
+    """Scan one catalog URL, preferring documented provider feeds when available.
+
+    VinoShipper is handled through its documented Product Feed API when a
+    producer id is supplied or can be recovered from the public shop shell.
+    Other sites retain the existing static-HTML/JSON-LD workflow.
+    """
+    requested = validate_public_url(url)
+
+    # If the pasted URL itself exposes a VinoShipper producer ID, or the user
+    # supplied one explicitly, the official feed can be queried directly.
+    if is_vinoshipper_url(requested):
+        pid = str(provider_id or _producer_id_from_url(requested) or "").strip()
+        if pid:
+            offers = fetch_vinoshipper_product_feed(pid, requested)
+            return CatalogFetch(
+                requested_url=requested,
+                final_url=requested,
+                status_code=200,
+                content_type="application/json",
+                html="",
+                bytes_read=0,
+                robots_status="documented provider feed",
+                request_note="VinoShipper Product Feed API",
+                provider="VinoShipper",
+                provider_note=f"Official Product Feed used for producer {pid}",
+                provider_requests=1,
+            ), offers
+
+        # Otherwise make the normal one-page request first; many VinoShipper
+        # embed shells expose the producer/account id in their configuration.
+        fetched = fetch_catalog_page(requested)
+        pid = infer_vinoshipper_producer_id(fetched.html, fetched.final_url)
+        if pid:
+            offers = fetch_vinoshipper_product_feed(pid, requested)
+            fetched.provider = "VinoShipper"
+            fetched.provider_note = f"Official Product Feed used for producer {pid}"
+            fetched.provider_requests = 1
+            fetched.request_note = f"{fetched.request_note}; VinoShipper Product Feed API"
+            return fetched, offers
+        fetched.provider = "VinoShipper"
+        fetched.provider_note = "Producer ID was not exposed in the public shop shell; enter it manually to use the documented Product Feed."
+        offers = extract_catalog_offers(fetched.html, fetched.final_url)
+        return fetched, offers
+
+    fetched = fetch_catalog_page(requested)
     offers = extract_catalog_offers(fetched.html, fetched.final_url)
     return fetched, offers
 

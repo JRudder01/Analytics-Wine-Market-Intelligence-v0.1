@@ -42,6 +42,8 @@ from catalog_scraper import (
     merge_offers,
     offers_to_rudder_rows,
     USER_AGENT as CATALOG_USER_AGENT,
+    is_vinoshipper_url,
+    infer_vinoshipper_producer_id,
 )
 from vision_intake import (
     extract_wine_from_images,
@@ -81,7 +83,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.19</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.20</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -115,7 +117,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.19 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.20 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -412,13 +414,14 @@ elif page == "Data Hub (Admin)":
     st.caption(
         "Paste one public winery shop/catalog page for a user-initiated, low-request scan. "
         "The catalog page is used to discover product links; individual product pages are fetched only after you explicitly select them. "
-        "Selected product pages now extract price plus conservative wine metadata for human review before staging."
+        "Known commerce providers can use documented product feeds when available; otherwise the catalog page is parsed normally and individual product pages are fetched only after explicit selection. Extracted rows remain subject to human review before staging."
     )
     with st.expander("Catalog scan behavior / safeguards"):
         st.markdown(
             f"""
 - **User-Agent:** `{CATALOG_USER_AGENT}`
-- **Initial scope:** only the exact catalog/shop page you paste is fetched
+- **Initial scope:** only the exact catalog/shop page you paste is fetched unless a recognized provider offers a documented product feed
+- **VinoShipper:** recognized shop URLs can use VinoShipper's documented Product Feed API; this avoids browser automation and can replace many individual product-page requests
 - **Product links:** discovered from already-fetched catalog HTML; they are **not opened automatically**
 - **Selected pages only:** product pages are fetched only after you check them and click **Scan selected product pages**
 - **Request pacing:** selected pages are fetched sequentially with a short delay; maximum 12 pages per batch
@@ -464,6 +467,27 @@ The goal is minimal request volume and explicit human control rather than site-w
             key=f"catalog_url_{catalog_nonce}",
         )
 
+    provider_id = ""
+    if is_vinoshipper_url(catalog_url):
+        inferred_existing = ""
+        prior_fetch = st.session_state.get("catalog_fetch")
+        if prior_fetch is not None and getattr(prior_fetch, "html", ""):
+            inferred_existing = infer_vinoshipper_producer_id(prior_fetch.html, prior_fetch.final_url)
+        provider_id = st.text_input(
+            "VinoShipper producer ID (usually detected automatically)",
+            value=inferred_existing,
+            placeholder="e.g., 4112",
+            key=f"catalog_provider_id_{catalog_nonce}",
+            help=(
+                "Wine Market Intelligence uses VinoShipper's documented Product Feed when a producer ID is available. "
+                "Leave this blank first; enter the numeric ID only if the shop shell does not expose it automatically."
+            ),
+        ).strip()
+        st.caption(
+            "VinoShipper detected. The documented Product Feed is preferred over scraping rendered shop content; "
+            "no VinoShipper API key is required for this public product-feed route."
+        )
+
     scan_col, clear_col = st.columns([3, 1])
     with scan_col:
         catalog_scan_clicked = st.button(
@@ -493,7 +517,7 @@ The goal is minimal request volume and explicit human control rather than site-w
     if catalog_scan_clicked:
         try:
             with st.spinner("Checking robots.txt and scanning the exact catalog page…"):
-                fetched, catalog_offers = scan_catalog(catalog_url)
+                fetched, catalog_offers = scan_catalog(catalog_url, provider_id=provider_id)
                 product_links = discover_product_links(fetched.html, fetched.final_url)
             st.session_state["catalog_fetch"] = fetched
             st.session_state["catalog_offers"] = [o.to_dict() for o in catalog_offers]
@@ -510,11 +534,24 @@ The goal is minimal request volume and explicit human control rather than site-w
     catalog_saved_winery = st.session_state.get("catalog_winery_value", catalog_winery.strip())
 
     if catalog_fetch is not None:
-        st.success(
-            f"Catalog page processed · HTTP {catalog_fetch.status_code} · "
-            f"{catalog_fetch.bytes_read / 1024:.0f} KB · {catalog_fetch.robots_status} · {catalog_fetch.request_note}. "
-            "No individual product pages were opened automatically."
-        )
+        provider_note = getattr(catalog_fetch, "provider_note", "")
+        if getattr(catalog_fetch, "provider", "") == "VinoShipper" and catalog_fetch.content_type == "application/json":
+            status_text = (
+                f"VinoShipper product feed processed · HTTP {catalog_fetch.status_code} · "
+                f"{catalog_fetch.request_note}. No individual product pages were opened."
+            )
+        else:
+            status_text = (
+                f"Catalog page processed · HTTP {catalog_fetch.status_code} · "
+                f"{catalog_fetch.bytes_read / 1024:.0f} KB · {catalog_fetch.robots_status} · {catalog_fetch.request_note}. "
+                "No individual product pages were opened automatically."
+            )
+        st.success(status_text)
+        if provider_note:
+            if "not exposed" in provider_note.casefold():
+                st.info(provider_note)
+            else:
+                st.caption(provider_note)
 
     product_scan_summary = st.session_state.get("catalog_product_scan_summary")
     if product_scan_summary:
@@ -743,10 +780,16 @@ The goal is minimal request volume and explicit human control rather than site-w
                 "Likely product pages were discovered above; select only the wines you want to inspect."
             )
         else:
-            st.warning(
-                "The page was fetched, but no dependable product + price records or likely wine product links were found in its static HTML/JSON-LD. "
-                "The scan ends here rather than escalating to browser automation."
-            )
+            if getattr(catalog_fetch, "provider", "") == "VinoShipper" and "not exposed" in getattr(catalog_fetch, "provider_note", "").casefold():
+                st.warning(
+                    "This VinoShipper shop shell did not expose its producer ID in the static page. "
+                    "Enter the numeric VinoShipper producer ID above and scan again; the tool will then use VinoShipper's documented Product Feed instead of browser automation."
+                )
+            else:
+                st.warning(
+                    "The page was fetched, but no dependable product + price records or likely wine product links were found in its static HTML/JSON-LD. "
+                    "The scan ends here rather than escalating to browser automation."
+                )
 
     st.divider()
     st.markdown("### Screenshot Intake")
@@ -1190,7 +1233,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.3.19 approach
+### v0.3.20 approach
 
 The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
@@ -1210,6 +1253,6 @@ The model is a market-positioning aid, not a guarantee of demand or sell-through
 
 **Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by an administrator. The AI extracts visible facts only; deterministic classification rules are applied afterward; a human must review/edit the proposed row before it is added to the session comp database.
 
-**Experimental Winery Catalog Scan** first makes a user-initiated request only to the exact public catalog/shop page entered by an administrator, after checking `robots.txt`. It can discover same-site product links without opening them; individual product pages are fetched only when explicitly selected by the administrator. Selected product pages can extract conservative factual metadata for review. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not execute JavaScript, bypass access controls, or automatically retry rate limits.
+**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
         """
     )

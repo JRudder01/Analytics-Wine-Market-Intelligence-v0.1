@@ -1,12 +1,22 @@
-# Wine Market Intelligence v0.3.19 — repeating catalog blocks
+# Wine Market Intelligence v0.3.20 — VinoShipper Product Feed adapter
 
-This patch extends the experimental catalog scan with a generic parser for static repeating wine product blocks.
+This focused patch adds a provider-aware catalog route for VinoShipper while preserving the existing generic catalog/product-page scanner.
 
-Extraction order is now:
+## What changed
 
-1. JSON-LD Product data
-2. Repeating static HTML product blocks
-3. Existing linked HTML-card parser
-4. Optional user-selected product-page follow-up when the catalog itself is insufficient
+- Detects VinoShipper shop/catalog URLs.
+- Prefers VinoShipper's documented public Product Feed endpoint when a producer ID is available.
+- Attempts to recover the producer ID from the public shop shell / pasted URL.
+- If auto-detection fails, exposes one optional numeric **VinoShipper producer ID** field rather than escalating to browser automation.
+- Converts provider-feed product JSON into the same editable review table used by other catalog scans.
+- Keeps generic JSON-LD, repeating-block, and selected-product-page fallbacks for non-VinoShipper sites.
+- No VinoShipper API key or new Streamlit secret is required for the documented product-feed route.
 
-This lets compatible storefront/catalog pages yield multiple visible wine/price records from the **single catalog request** already made, without opening individual product pages.
+## Files to replace
+
+- `app.py`
+- `catalog_scraper.py`
+
+Optional test update:
+
+- `tests/test_catalog_enrichment.py`

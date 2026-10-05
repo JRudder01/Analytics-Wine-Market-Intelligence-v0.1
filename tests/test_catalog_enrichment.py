@@ -176,3 +176,48 @@ def test_repeating_static_catalog_sale_price_and_member_status():
     assert o.regular_price == 60.0
     assert o.sale_price == 48.0
     assert o.availability_status == "Member exclusive"
+
+
+def test_vinoshipper_producer_id_detection():
+    from catalog_scraper import infer_vinoshipper_producer_id
+    html = '''<script>window.top.Vinoshipper.init(4112, {theme: "light"});</script>'''
+    assert infer_vinoshipper_producer_id(html, "https://vinoshipper.com/shop/915_lincoln") == "4112"
+
+
+def test_vinoshipper_feed_conversion():
+    from catalog_scraper import extract_vinoshipper_feed_offers
+    payload = {
+        "products": [
+            {
+                "id": 1001,
+                "name": "2021 Cabernet Sauvignon",
+                "vintage": 2021,
+                "consumerPrice": 50,
+                "varietal": "Cabernet Sauvignon",
+                "appellation": "Paso Robles, El Pomar District",
+                "alcoholLevel": 15.58,
+                "description": "Paso Robles Cabernet Sauvignon from El Pomar District.",
+            },
+            {
+                "id": 1002,
+                "name": "2023 Grenache Blanc",
+                "consumerPrice": 40,
+                "varietal": "Grenache Blanc",
+                "appellation": "Paso Robles, El Pomar District",
+                "alcoholLevel": 14.0,
+            },
+        ]
+    }
+    offers = extract_vinoshipper_feed_offers(
+        payload,
+        producer_id="4112",
+        shop_url="https://vinoshipper.com/shop/915_lincoln",
+    )
+    by_name = {o.wine: o for o in offers}
+    assert by_name["Cabernet Sauvignon"].vintage == "2021"
+    assert by_name["Cabernet Sauvignon"].regular_price == 50.0
+    assert by_name["Cabernet Sauvignon"].region == "Paso Robles"
+    assert by_name["Cabernet Sauvignon"].subregion == "El Pomar District"
+    assert by_name["Cabernet Sauvignon"].alcohol_pct == 15.58
+    assert by_name["Grenache Blanc"].regular_price == 40.0
+    assert by_name["Grenache Blanc"].general_category == "White"
