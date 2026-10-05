@@ -1,13 +1,12 @@
-# v0.3.13 update instructions
+# v0.3.14 Neutral User-Agent patch
 
-Upload/replace these files in the **root** of the existing GitHub repository:
+Replace these two root-level files in GitHub:
 
 - `app.py`
-- `catalog_scraper.py` (new)
-- `requirements.txt`
+- `catalog_scraper.py`
 
-No database replacement, GitHub secret change, OpenAI key change, or Streamlit setting change is required for this patch.
+The catalog scanner now sends the neutral User-Agent:
 
-After committing the files, allow Streamlit to redeploy. Open **Data Hub (Admin)** and use the new **Winery Catalog Scan (Experimental)** section.
+`WineCatalogResearch/0.1 (user-initiated single-page request)`
 
-For testing, paste one winery shop/catalog URL at a time. The tool will not automatically crawl the rest of the winery site or open each wine product page.
+It does not include Rudder Analytics, but it also does not impersonate Chrome or another human browser. All existing single-page, robots.txt, no-retry, and access-control safeguards remain unchanged.

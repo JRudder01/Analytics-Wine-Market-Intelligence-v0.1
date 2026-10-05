@@ -413,7 +413,7 @@ elif page == "Data Hub (Admin)":
     with st.expander("Catalog scan behavior / safeguards", expanded=False):
         st.markdown(
             f"""
-- **Transparent User-Agent:** `{CATALOG_USER_AGENT}`
+- **Request User-Agent:** `{CATALOG_USER_AGENT}`
 - **Scope:** the exact pasted page only; Rudder does not automatically follow product links
 - **robots.txt:** checked before the page is fetched; the result is cached in-process for 24 hours
 - **Access controls / rate limits:** HTTP 401, 403, or 429 stops the scan; there is no bypass or automatic retry

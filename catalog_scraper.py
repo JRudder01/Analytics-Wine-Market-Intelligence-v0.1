@@ -16,8 +16,8 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 USER_AGENT = (
-    "RudderAnalytics-WineryCatalogCollector/0.1 "
-    "(user-initiated catalog research; contact via project owner)"
+    "WineCatalogResearch/0.1 "
+    "(user-initiated single-page request)"
 )
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
