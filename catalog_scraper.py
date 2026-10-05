@@ -20,7 +20,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
-CATALOG_PARSER_BUILD = "v0.3.24"
+CATALOG_PARSER_BUILD = "v0.3.25"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
@@ -689,6 +689,26 @@ def _normalize_offer_geography(region: str, subregion: str = "") -> tuple[str, s
     }:
         return "Paso Robles", text
 
+    # Canonicalize recognized nested AVAs/districts regardless of source adapter.
+    region_key = _ascii_key(text)
+    sub_key = _ascii_key(raw_subregion)
+    region_spec = _LOCATION_BY_KEY.get(region_key)
+    sub_spec = _LOCATION_BY_KEY.get(sub_key) if sub_key else None
+
+    if sub_spec and sub_spec[1] == "narrow":
+        canonical_sub, _, parent = sub_spec
+        canonical_region = parent or text
+        # Preserve an explicitly supplied broad region if it is sensible.
+        if region_spec and region_spec[1] == "broad":
+            canonical_region = region_spec[0]
+        return canonical_region, canonical_sub
+
+    if region_spec:
+        canonical_region, role, parent = region_spec
+        if role == "narrow" and parent:
+            return parent, canonical_region
+        return canonical_region, ""
+
     # If the dedicated subregion is useful, keep it unless it duplicates region.
     if raw_subregion and _ascii_key(raw_subregion) != _ascii_key(text):
         return text, raw_subregion
@@ -817,6 +837,107 @@ def finalize_vinoshipper_offer_dicts(rows: list[dict[str, Any]], producer_id: st
             provider_id=str(row.get("provider_id") or pid_default),
         ))
     return [o.to_dict() for o in finalize_vinoshipper_offers(offers, pid_default)]
+
+
+_SINGLE_VARIETAL_CATEGORIES = {
+    "Cabernet Sauvignon", "Cabernet Franc", "Chardonnay", "Pinot Noir", "Merlot",
+    "Sauvignon Blanc", "Syrah", "Grenache", "Zinfandel", "Petite Sirah",
+    "Viognier", "Riesling", "Barbera", "Sangiovese", "Tempranillo", "Vermentino",
+    "Muscat Canelli", "Malbec", "Petit Verdot", "Tannat", "Grenache Blanc", "Albariño",
+}
+
+
+def _finalize_catalog_offer(offer: WineOffer, provider_id: str = "") -> WineOffer:
+    """Canonical last pass used by *every* catalog source before review/staging.
+
+    Source adapters are responsible only for extracting raw facts.  This function
+    owns canonical identity, category, geography, and confidence cleanup so JSON-LD,
+    static HTML, selected product pages, and provider feeds cannot drift apart.
+    """
+    pid = str(provider_id or offer.provider_id or "").strip()
+    if pid or "vinoshipper" in str(offer.extraction_method or "").casefold():
+        offer = _finalize_vinoshipper_offer(offer, pid)
+
+    offer.wine = _normalize_wine_label_aliases(_canonical_wine_name(offer.wine, offer.vintage))
+    offer.vintage = str(offer.vintage or "").strip()
+    if re.fullmatch(r"\d{4}\.0", offer.vintage):
+        offer.vintage = offer.vintage[:-2]
+
+    offer.varietal = _normalize_varietal_aliases(offer.varietal)
+    if not offer.varietal and offer.graph_category in _SINGLE_VARIETAL_CATEGORIES:
+        offer.varietal = offer.graph_category
+
+    if not offer.graph_category or offer.graph_category == "Other":
+        offer.graph_category = _infer_graph_category(offer.varietal, offer.wine, offer.evidence)
+    offer.general_category = _infer_general_category(offer.graph_category, offer.varietal, offer.wine)
+    offer.region, offer.subregion = _normalize_offer_geography(offer.region, offer.subregion)
+
+    if "reserve" in _ascii_key(offer.wine):
+        offer.product_tier = "Reserve"
+    offer.product_tier = offer.product_tier or "Core"
+
+    has_price = any(x is not None for x in (offer.regular_price, offer.sale_price, offer.club_price))
+    strong_identity = bool(offer.wine and offer.vintage and offer.graph_category and offer.graph_category != "Other")
+    # Never upgrade an extractor's deliberate Moderate/Low confidence (for example
+    # ambiguous geography).  Only downgrade a nominal High when key identity facts
+    # are missing.
+    current = str(offer.confidence or "Moderate").strip().title()
+    if current == "High" and (not has_price or not strong_identity):
+        offer.confidence = "Moderate"
+    elif current not in {"High", "Moderate", "Low"}:
+        offer.confidence = "Moderate"
+    else:
+        offer.confidence = current
+    return offer
+
+
+def finalize_catalog_offers(offers: list[WineOffer], provider_id: str = "") -> list[WineOffer]:
+    return _dedupe([_finalize_catalog_offer(o, provider_id) for o in offers])
+
+
+def finalize_catalog_offer_dicts(rows: list[dict[str, Any]], provider_id: str = "") -> list[dict[str, Any]]:
+    """Upgrade serialized session-state rows from any catalog adapter.
+
+    This is intentionally adapter-neutral so a Streamlit hot reload cannot leave one
+    source path on stale normalization behavior.
+    """
+    offers: list[WineOffer] = []
+    pid_default = str(provider_id or "").strip()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        def _none_if_nan(value: Any) -> Any:
+            try:
+                if value != value:
+                    return None
+            except Exception:
+                pass
+            return value
+        offers.append(WineOffer(
+            wine=str(row.get("wine") or ""),
+            vintage=str(row.get("vintage") or ""),
+            regular_price=_none_if_nan(row.get("regular_price")),
+            sale_price=_none_if_nan(row.get("sale_price")),
+            club_price=_none_if_nan(row.get("club_price")),
+            currency=str(row.get("currency") or "USD"),
+            product_url=str(row.get("product_url") or ""),
+            evidence=str(row.get("evidence") or ""),
+            extraction_method=str(row.get("extraction_method") or ""),
+            confidence=str(row.get("confidence") or "Moderate"),
+            varietal=str(row.get("varietal") or ""),
+            graph_category=str(row.get("graph_category") or ""),
+            general_category=str(row.get("general_category") or ""),
+            region=str(row.get("region") or ""),
+            subregion=str(row.get("subregion") or ""),
+            alcohol_pct=_none_if_nan(row.get("alcohol_pct")),
+            cases_produced=_none_if_nan(row.get("cases_produced")),
+            estate=bool(row.get("estate", False)),
+            single_vineyard=bool(row.get("single_vineyard", False)),
+            product_tier=str(row.get("product_tier") or "Core"),
+            availability_status=str(row.get("availability_status") or ""),
+            provider_id=str(row.get("provider_id") or pid_default),
+        ))
+    return [o.to_dict() for o in finalize_catalog_offers(offers, pid_default)]
 
 def _looks_like_vinoshipper_product_node(node: dict[str, Any]) -> bool:
     name = _json_lookup(node, "name", "title", "productName", "wineName", "displayName")
@@ -1759,45 +1880,79 @@ def _first_match(patterns: list[str], text: str, flags: int = re.I) -> str:
     return ""
 
 
-def _extract_region(text: str) -> tuple[str, str, bool]:
-    """Extract broad AVA + one unambiguous subregion.
+def _location_pattern(name: str) -> str:
+    """Match a canonical AVA name even when page markup collapses whitespace.
 
-    Returns (region, subregion, geography_conflict).  The conflict flag is set
-    when the page contains evidence for two or more distinct narrower AVAs /
-    districts.  In that case we preserve the broad region but intentionally
-    leave subregion blank rather than choosing one arbitrarily.
+    Winery templates sometimes render text such as ``OakKnoll District`` or
+    ``NapaValley``.  Treat punctuation/spacing between location words as optional
+    rather than creating one-off winery rules.
     """
-    known = [
-        "Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast",
-        "Russian River Valley", "Carneros", "Oak Knoll District", "Howell Mountain",
-        "Atlas Peak", "Mount Veeder", "Stags Leap District", "Rutherford", "Oakville",
-        "Yountville", "Calistoga", "St. Helena", "Adelaida District", "Willow Creek District",
-        "Templeton Gap District", "Santa Margarita Ranch", "York Mountain",
-        "El Pomar District", "Geneseo District", "Creston District", "Estrella District",
-        "San Juan Creek District", "San Antonio Valley",
-    ]
-    broad_names = {
-        "Napa Valley", "Paso Robles", "San Luis Obispo Coast", "Sonoma Coast",
-        "Carneros", "Russian River Valley",
-    }
+    tokens = re.findall(r"[A-Za-zÀ-ÿ0-9]+", name)
+    if not tokens:
+        return re.escape(name)
+    return r"(?<!\w)" + r"[\s.\-–—]*".join(re.escape(t) for t in tokens) + r"(?!\w)"
 
-    # Collect known AVA/district mentions first instead of returning immediately
-    # from a single "Appellation:" field.  Product pages sometimes show one
-    # technical-sheet appellation while the sourcing prose names additional
-    # districts; those multi-area wines should not be assigned to just one.
-    mentions: list[tuple[int, str]] = []
-    for name in known:
-        for match in re.finditer(rf"\b{re.escape(name)}\b", text, re.I):
-            mentions.append((match.start(), name))
+
+_LOCATION_SPECS: list[tuple[str, str, str]] = [
+    # canonical name, role, known parent (blank for broad/standalone regions)
+    ("Napa Valley", "broad", ""),
+    ("Paso Robles", "broad", ""),
+    ("San Luis Obispo Coast", "broad", ""),
+    ("Santa Cruz Mountains", "broad", ""),
+    ("Sonoma Coast", "broad", ""),
+    ("Russian River Valley", "broad", ""),
+    ("Carneros", "narrow", "Napa Valley"),
+    ("Oak Knoll District", "narrow", "Napa Valley"),
+    ("Howell Mountain", "narrow", "Napa Valley"),
+    ("Atlas Peak", "narrow", "Napa Valley"),
+    ("Mount Veeder", "narrow", "Napa Valley"),
+    ("Stags Leap District", "narrow", "Napa Valley"),
+    ("Rutherford", "narrow", "Napa Valley"),
+    ("Oakville", "narrow", "Napa Valley"),
+    ("Yountville", "narrow", "Napa Valley"),
+    ("Calistoga", "narrow", "Napa Valley"),
+    ("St. Helena", "narrow", "Napa Valley"),
+    ("Diamond Mountain", "narrow", "Napa Valley"),
+    ("Adelaida District", "narrow", "Paso Robles"),
+    ("Willow Creek District", "narrow", "Paso Robles"),
+    ("Templeton Gap District", "narrow", "Paso Robles"),
+    ("Santa Margarita Ranch", "narrow", "Paso Robles"),
+    ("El Pomar District", "narrow", "Paso Robles"),
+    ("Geneseo District", "narrow", "Paso Robles"),
+    ("Creston District", "narrow", "Paso Robles"),
+    ("Estrella District", "narrow", "Paso Robles"),
+    ("San Juan Creek District", "narrow", "Paso Robles"),
+    ("York Mountain", "standalone", ""),
+    ("San Antonio Valley", "standalone", ""),
+]
+_LOCATION_BY_KEY = {_ascii_key(name): (name, role, parent) for name, role, parent in _LOCATION_SPECS}
+
+
+def _extract_region(text: str) -> tuple[str, str, bool]:
+    """Extract broad AVA + one unambiguous narrower AVA/district.
+
+    Returns ``(region, subregion, geography_conflict)``.  If two or more distinct
+    narrower areas are present, the broad region is retained and subregion is
+    intentionally blank.  Matching tolerates collapsed whitespace/punctuation so
+    page-template formatting does not change the result.
+    """
+    mentions: list[tuple[int, str, str, str]] = []
+    for name, role, parent in _LOCATION_SPECS:
+        for match in re.finditer(_location_pattern(name), text, re.I):
+            mentions.append((match.start(), name, role, parent))
+
+    # Common synonym used by Napa producers.
+    for match in re.finditer(_location_pattern("Los Carneros"), text, re.I):
+        mentions.append((match.start(), "Carneros", "narrow", "Napa Valley"))
+
     mentions.sort(key=lambda item: item[0])
-
-    ordered_names: list[str] = []
-    seen_names: set[str] = set()
-    for _, name in mentions:
+    ordered: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for _, name, role, parent in mentions:
         key = _ascii_key(name)
-        if key not in seen_names:
-            seen_names.add(key)
-            ordered_names.append(name)
+        if key not in seen:
+            seen.add(key)
+            ordered.append((name, role, parent))
 
     explicit_patterns = [
         r"(?:appellation|ava|region)\s*[:\-]?\s*([A-Z][A-Za-zÀ-ÿ0-9'&.\- ]{2,60}?)(?=\s{2,}|\s(?:technical|alcohol|harvest|cases|vineyard|$))",
@@ -1806,44 +1961,48 @@ def _extract_region(text: str) -> tuple[str, str, bool]:
     explicit = _first_match(explicit_patterns, text)
     if explicit:
         explicit = re.sub(r"\s+AVA$", "", explicit, flags=re.I).strip()
-        # If the explicit field names one of our known locations, ensure it is
-        # represented even when formatting prevented the generic scan above.
-        for name in known:
-            if _ascii_key(explicit) == _ascii_key(name):
-                if not any(_ascii_key(existing) == _ascii_key(name) for existing in ordered_names):
-                    ordered_names.insert(0, name)
-                explicit = name
-                break
+        explicit_key = _ascii_key(explicit)
+        spec = _LOCATION_BY_KEY.get(explicit_key)
+        if spec and explicit_key not in seen:
+            ordered.insert(0, spec)
+            seen.add(explicit_key)
+            explicit = spec[0]
 
-    broad_hits = [name for name in ordered_names if name in broad_names]
-    narrow_hits = [name for name in ordered_names if name not in broad_names]
+    broad_hits = [name for name, role, _ in ordered if role == "broad"]
+    narrow_hits = [(name, parent) for name, role, parent in ordered if role == "narrow"]
+    standalone_hits = [name for name, role, _ in ordered if role == "standalone"]
+
     # Preserve order while de-duplicating.
     broad_hits = list(dict.fromkeys(broad_hits))
     narrow_hits = list(dict.fromkeys(narrow_hits))
+    standalone_hits = list(dict.fromkeys(standalone_hits))
 
-    broad = broad_hits[0] if broad_hits else ""
-
-    # Two or more distinct narrower AVAs/districts means the finished wine is
-    # multi-area for our single-subregion schema.  Keep the broad AVA only.
+    # If multiple narrower AVAs/districts are named, never choose one arbitrarily.
     if len(narrow_hits) >= 2:
-        return broad or (explicit if explicit and explicit in broad_names else ""), "", True
+        broad = broad_hits[0] if broad_hits else ""
+        if not broad:
+            parents = [parent for _, parent in narrow_hits if parent]
+            if parents and len(set(parents)) == 1:
+                broad = parents[0]
+        return broad, "", True
 
-    if broad:
-        return broad, (narrow_hits[0] if len(narrow_hits) == 1 else ""), False
-
-    # No recognized broad AVA.  If a single known narrower area is the only
-    # geography evidence, keep it as the region rather than inventing a parent.
     if len(narrow_hits) == 1:
-        return narrow_hits[0], "", False
+        narrow, parent = narrow_hits[0]
+        if broad_hits:
+            return broad_hits[0], narrow, False
+        if parent:
+            return parent, narrow, False
+        return narrow, "", False
 
-    # Finally preserve an explicit free-text appellation/region when it was not
-    # in the known list.  This keeps the extractor useful beyond our initial CA
-    # test set without guessing a subregion hierarchy.
+    if broad_hits:
+        return broad_hits[0], "", False
+    if standalone_hits:
+        return standalone_hits[0], "", False
+
+    # Preserve explicit free-text geography when it is not in our registry.
     if explicit:
         return explicit, "", False
-
     return "", "", False
-
 
 def _extract_abv(text: str) -> float | None:
     patterns = [
@@ -1935,6 +2094,15 @@ def _extract_varietal(title: str, text: str) -> str:
     title_hits = grapes_in(title)
     if title_hits:
         return title_hits[0]
+
+    # A product name may be a proprietary/vineyard label while the opening prose
+    # plainly identifies one grape (e.g. “Vineyard II ... Cabernet Sauvignon”).
+    # Accept a single unambiguous grape from the first part of the product copy;
+    # if multiple grapes occur, leave varietal blank unless a blend rule above
+    # already captured them.
+    body_hits = grapes_in(text[:1800])
+    if len(body_hits) == 1:
+        return body_hits[0]
     return ""
 
 
@@ -2105,7 +2273,7 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
             if title and (_ascii_key(offer.wine) in {"wine", "product", "shop"} or len(offer.wine) < 4):
                 offer.wine = title
             offer.wine = _canonical_wine_name(offer.wine, offer.vintage)
-        return _dedupe(structured)
+        return finalize_catalog_offers(structured)
 
     if not title:
         return []
@@ -2124,7 +2292,7 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
 
     extracted_vintage = _vintage_from_name(title) or _vintage_from_name(page_text[:900])
     canonical_title = _canonical_wine_name(title, extracted_vintage)
-    return [
+    return finalize_catalog_offers([
         WineOffer(
             wine=canonical_title,
             vintage=extracted_vintage,
@@ -2138,7 +2306,7 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
             confidence=("Moderate" if geography_conflict else ("High" if regular is not None else "Moderate")),
             **metadata,
         )
-    ]
+    ])
 
 def merge_offers(offers: list[WineOffer]) -> list[WineOffer]:
     return _dedupe(offers)
@@ -2186,7 +2354,7 @@ def scan_selected_product_pages(
         if idx < len(unique_urls) - 1 and delay_seconds > 0:
             time.sleep(delay_seconds)
 
-    return _dedupe(offers), failures, fetched_count
+    return finalize_catalog_offers(offers), failures, fetched_count
 
 
 def _dedupe(offers: list[WineOffer]) -> list[WineOffer]:
@@ -2247,7 +2415,7 @@ def extract_catalog_offers(html: str, base_url: str) -> list[WineOffer]:
     structured = _extract_jsonld(soup, base_url)
     repeating = _extract_repeating_product_blocks(soup, base_url)
     cards = _extract_html_cards(soup, base_url)
-    return _dedupe(structured + repeating + cards)
+    return finalize_catalog_offers(structured + repeating + cards)
 
 
 def scan_catalog(url: str, *, provider_id: str = "") -> tuple[CatalogFetch, list[WineOffer]]:
@@ -2304,8 +2472,7 @@ def offers_to_rudder_rows(offers: list[WineOffer], winery: str = "") -> list[dic
     today = date.today().isoformat()
     rows: list[dict[str, Any]] = []
     for offer in offers:
-        if getattr(offer, "provider_id", ""):
-            offer = _finalize_vinoshipper_offer(offer, offer.provider_id)
+        offer = _finalize_catalog_offer(offer, getattr(offer, "provider_id", ""))
         selected_price = offer.regular_price or offer.sale_price or offer.club_price
         if selected_price is None:
             continue

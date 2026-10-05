@@ -44,7 +44,7 @@ from catalog_scraper import (
     USER_AGENT as CATALOG_USER_AGENT,
     is_vinoshipper_url,
     infer_vinoshipper_producer_id,
-    finalize_vinoshipper_offer_dicts,
+    finalize_catalog_offer_dicts,
     CATALOG_PARSER_BUILD,
 )
 from vision_intake import (
@@ -441,6 +441,20 @@ The goal is minimal request volume and explicit human control rather than site-w
 
     if "catalog_scan_nonce" not in st.session_state:
         st.session_state.catalog_scan_nonce = 0
+
+    # Derived catalog rows are parser-build-specific.  On deployment of a new
+    # parser build, discard only derived scan/review state so stale serialized
+    # records cannot masquerade as current extraction results. User-entered
+    # source fields remain governed by the normal widget nonce.
+    if st.session_state.get("catalog_session_parser_build") != CATALOG_PARSER_BUILD:
+        for _key in [
+            "catalog_fetch", "catalog_offers", "catalog_winery_value",
+            "catalog_product_links", "catalog_product_scan_summary",
+            "catalog_product_scan_failures",
+        ]:
+            st.session_state.pop(_key, None)
+        st.session_state["catalog_session_parser_build"] = CATALOG_PARSER_BUILD
+
     catalog_nonce = int(st.session_state.catalog_scan_nonce)
 
     source_status = st.selectbox(
@@ -536,12 +550,12 @@ The goal is minimal request volume and explicit human control rather than site-w
     catalog_product_links = st.session_state.get("catalog_product_links", [])
     catalog_saved_winery = st.session_state.get("catalog_winery_value", catalog_winery.strip())
 
-    # Streamlit may preserve serialized offer rows across a source-code hot reload.
-    # Re-run VinoShipper rows through the current finalizer before they ever reach
-    # the editor/export so stale session state cannot mask a parser deployment.
-    if catalog_fetch is not None and getattr(catalog_fetch, "provider", "") == "VinoShipper" and catalog_offers_data:
+    # Every adapter now uses the same final canonical pass immediately before
+    # review/export. This keeps VinoShipper, JSON-LD, static HTML, and selected
+    # product-page records on one normalization contract.
+    if catalog_offers_data:
         resolved_provider_id = str(provider_id or "").strip()
-        if not resolved_provider_id:
+        if not resolved_provider_id and catalog_fetch is not None:
             provider_note_for_id = str(getattr(catalog_fetch, "provider_note", "") or "")
             match = re.search(r"producer\s+(\d+)", provider_note_for_id, re.I)
             if match:
@@ -552,9 +566,8 @@ The goal is minimal request volume and explicit human control rather than site-w
                 if candidate:
                     resolved_provider_id = candidate
                     break
-        if resolved_provider_id:
-            catalog_offers_data = finalize_vinoshipper_offer_dicts(catalog_offers_data, resolved_provider_id)
-            st.session_state["catalog_offers"] = catalog_offers_data
+        catalog_offers_data = finalize_catalog_offer_dicts(catalog_offers_data, resolved_provider_id)
+        st.session_state["catalog_offers"] = catalog_offers_data
 
     if catalog_fetch is not None:
         provider_note = getattr(catalog_fetch, "provider_note", "")

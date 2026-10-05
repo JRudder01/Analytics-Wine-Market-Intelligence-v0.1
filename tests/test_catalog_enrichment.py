@@ -517,3 +517,84 @@ def test_finalize_vinoshipper_offer_dicts_upgrades_stale_session_rows():
     assert row["graph_category"] == "Red Blend"
     assert row["alcohol_pct"] == 15.3
     assert row["provider_id"] == "4112"
+
+
+def test_compact_markup_multiple_napa_subregions_stays_broad_only():
+    """Collapsed template text like OakKnoll/NapaValley must still trigger conflict."""
+    html = """
+    <html><body>
+      <h1>Blanc №9 — 2023</h1>
+      <h4>NapaValley</h4>
+      <p>A blend of Sémillon and Sauvignon Blanc from vineyards in NapaValley
+      (OakKnoll District and Yountville).</p>
+      <p>Alcohol 13%. Cases Produced 2400. $45. Buy</p>
+    </body></html>
+    """
+    o = _extract_product_page_offers(html, "https://example.com/shop/blanc-2023-9")[0]
+    assert o.region == "Napa Valley"
+    assert o.subregion == ""
+    assert o.confidence == "Moderate"
+
+
+def test_santa_cruz_mountains_is_preserved_as_region():
+    html = """
+    <html><body>
+      <h1>Mountain Cuvée №6 — 2023</h1>
+      <h4>Bates Ranch</h4><h4>Santa Cruz Mountains</h4>
+      <p>A blend of Cabernet Sauvignon and Cabernet Franc from Bates Ranch in the Santa Cruz Mountains.</p>
+      <p>Alcohol 13.9%. Cases Produced 594. $105. Buy</p>
+    </body></html>
+    """
+    o = _extract_product_page_offers(html, "https://example.com/shop/mountain-cuvee-2023")[0]
+    assert o.region == "Santa Cruz Mountains"
+    assert o.subregion == ""
+    assert o.varietal == "Cabernet Sauvignon, Cabernet Franc"
+    assert o.graph_category == "Bordeaux Blend"
+
+
+def test_diamond_mountain_maps_to_napa_subregion_and_prose_varietal():
+    html = """
+    <html><body>
+      <h1>Vineyard II №2 — 2023</h1>
+      <h4>Diamond Mountain</h4>
+      <p>Cabernet Sauvignon “Vineyard II” comes from a historic vineyard atop Diamond Mountain.
+      This tiny sliver of Napa Valley produces powerful mountain wines.</p>
+      <p>Alcohol 14.5. Cases Produced 173. $135. Buy</p>
+    </body></html>
+    """
+    o = _extract_product_page_offers(html, "https://example.com/shop/vineyard-2-2023")[0]
+    assert o.region == "Napa Valley"
+    assert o.subregion == "Diamond Mountain"
+    assert o.varietal == "Cabernet Sauvignon"
+    assert o.graph_category == "Cabernet Sauvignon"
+
+
+def test_universal_finalizer_applies_to_non_provider_serialized_rows():
+    from catalog_scraper import finalize_catalog_offer_dicts
+    rows = [{
+        "wine": "Vineyard II №2",
+        "vintage": "2023",
+        "regular_price": 135.0,
+        "sale_price": None,
+        "club_price": None,
+        "currency": "USD",
+        "product_url": "https://example.com/shop/vineyard-2-2023",
+        "evidence": "Cabernet Sauvignon from Diamond Mountain.",
+        "extraction_method": "Selected product page",
+        "confidence": "High",
+        "varietal": "",
+        "graph_category": "Cabernet Sauvignon",
+        "general_category": "Red",
+        "region": "Diamond Mountain",
+        "subregion": "",
+        "alcohol_pct": 14.5,
+        "cases_produced": 173,
+        "estate": False,
+        "single_vineyard": True,
+        "product_tier": "Limited",
+        "availability_status": "Available",
+    }]
+    o = finalize_catalog_offer_dicts(rows)[0]
+    assert o["varietal"] == "Cabernet Sauvignon"
+    assert o["region"] == "Napa Valley"
+    assert o["subregion"] == "Diamond Mountain"
