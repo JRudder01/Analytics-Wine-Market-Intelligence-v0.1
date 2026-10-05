@@ -408,3 +408,77 @@ def test_915_lincoln_public_catalog_abv_fallbacks():
     assert by_name["Merlot"].alcohol_pct == 14.95
     assert by_name["Pinot Noir"].alcohol_pct == 14.54
     assert by_name["Cabernet Sauvignon"].alcohol_pct == 15.58
+
+
+def test_vinoshipper_final_normalizer_matches_observed_915_export_shape():
+    from catalog_scraper import WineOffer, finalize_vinoshipper_offers
+
+    raw = [
+        WineOffer("Better Together", "2021", 48, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/better_together_163766", "", "VinoShipper Product Feed", "High", varietal="Zinfandel", graph_category="Zinfandel", general_category="Red", region="Paso Robles", provider_id="4112"),
+        WineOffer("Cabernet and Merlot Blend", "2018", 60, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/cabernet_and_merlot_blend_92163", "", "VinoShipper Product Feed", "High", varietal="Cabernet Sauvignon, Merlot", graph_category="Bordeaux Blend", general_category="Red", region="CA - San Luis Obispo County (Central Coast)", provider_id="4112"),
+        WineOffer("Distinctive", "2022", 49, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/distinctive_163765", "", "VinoShipper Product Feed", "High", varietal="Cabernet Sauvignon", graph_category="Cabernet Sauvignon", general_category="Red", region="Paso Robles", provider_id="4112"),
+        WineOffer("Distinctive", "2023", 56, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/distinctive_194910", "", "VinoShipper Product Feed", "Moderate", varietal="Distinvtive", graph_category="Other", general_category="Red", region="Paso Robles", provider_id="4112"),
+        WineOffer("Le Rhone", "2021", 56, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/le_rhone_132861", "", "VinoShipper Product Feed", "High", varietal="Mourvèdre", graph_category="Rhône Blend", general_category="Red", region="Paso Robles", provider_id="4112"),
+        WineOffer("Le Rhone", "2023", 62, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/le_rhone_181952", "", "VinoShipper Product Feed", "High", varietal="GSM", graph_category="Rhône Blend", general_category="Red", region="Paso Robles", provider_id="4112"),
+        WineOffer("Pinot Noir", "2023", 58, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/pino_noir_167931", "", "VinoShipper Product Feed", "High", varietal="Pinot Noir", graph_category="Pinot Noir", general_category="Red", region="San Luis Obispo Coast", provider_id="4112"),
+        WineOffer("Tannat", "2023", 56, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/tannat_194897", "", "VinoShipper Product Feed", "High", varietal="Tannat", graph_category="Tannat", general_category="Red", region="CA - Monterey County - San Antonio Valley", provider_id="4112"),
+        WineOffer("Trois", "2021", 47, None, None, "USD", "https://vinoshipper.com/shop/915_lincoln/trois_136674", "", "VinoShipper Product Feed", "High", varietal="Malbec", graph_category="Malbec", general_category="Red", region="Paso Robles", provider_id="4112"),
+    ]
+    rows = finalize_vinoshipper_offers(raw, "4112")
+    by_key = {(o.wine, o.vintage): o for o in rows}
+
+    assert by_key[("Better Together", "2021")].alcohol_pct == 15.34
+    assert "Zinfandel" in by_key[("Better Together", "2021")].varietal
+
+    cab_merlot = by_key[("Cabernet and Merlot Blend", "2018")]
+    assert cab_merlot.graph_category == "Bordeaux Blend"
+    assert cab_merlot.region == "San Luis Obispo County"
+    assert cab_merlot.alcohol_pct == 13.65
+
+    d22 = by_key[("Distinctive", "2022")]
+    assert d22.graph_category == "Red Blend"
+    assert "50% Cabernet Sauvignon" in d22.varietal
+    assert "50% Petite Sirah" in d22.varietal
+    assert d22.alcohol_pct == 15.3
+
+    d23 = by_key[("Distinctive", "2023")]
+    assert d23.graph_category == "Red Blend"
+    assert d23.varietal == ""
+    assert d23.alcohol_pct == 15.4
+    assert d23.confidence == "Moderate"
+
+    rhone21 = by_key[("Le Rhone", "2021")]
+    assert rhone21.graph_category == "Rhône Blend"
+    assert "67% Mourvèdre" in rhone21.varietal
+    assert "33% Grenache" in rhone21.varietal
+    assert rhone21.alcohol_pct == 14.4
+
+    rhone23 = by_key[("Le Rhone", "2023")]
+    assert rhone23.graph_category == "Rhône Blend"
+    assert "38% Grenache" in rhone23.varietal
+    assert "32% Syrah" in rhone23.varietal
+    assert "30% Mourvèdre" in rhone23.varietal
+    assert rhone23.alcohol_pct == 15.1
+
+    tannat = by_key[("Tannat", "2023")]
+    assert tannat.region == "San Antonio Valley"
+    assert tannat.alcohol_pct == 15.9
+
+    trois = by_key[("Trois", "2021")]
+    assert trois.graph_category == "Bordeaux Blend"
+    assert "69% Malbec" in trois.varietal
+    assert "17% Petit Verdot" in trois.varietal
+    assert "14% Cabernet Sauvignon" in trois.varietal
+    assert trois.alcohol_pct == 15.3
+
+
+def test_vinoshipper_finalizer_runs_idempotently():
+    from catalog_scraper import WineOffer, finalize_vinoshipper_offers
+    offer = WineOffer(
+        "Le Rhone", "2023", 62, None, None, "USD",
+        "https://vinoshipper.com/shop/915_lincoln/le_rhone_181952", "", "VinoShipper Product Feed", "High",
+        varietal="GSM", graph_category="Rhône Blend", general_category="Red", region="Paso Robles", provider_id="4112"
+    )
+    once = finalize_vinoshipper_offers([offer], "4112")
+    twice = finalize_vinoshipper_offers(once, "4112")
+    assert once[0].to_dict() == twice[0].to_dict()

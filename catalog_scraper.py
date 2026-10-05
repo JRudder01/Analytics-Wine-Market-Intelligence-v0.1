@@ -83,6 +83,7 @@ class WineOffer:
     single_vineyard: bool = False
     product_tier: str = "Core"
     availability_status: str = ""
+    provider_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -639,6 +640,137 @@ def _apply_vinoshipper_record_override(
     return varietal, graph_category, alcohol_pct
 
 
+
+def _normalize_offer_geography(region: str, subregion: str = "") -> tuple[str, str]:
+    """Normalize provider display geography into the app's region/subregion fields.
+
+    This is deliberately conservative: it strips provider wrappers, preserves a
+    broad region when known, and only promotes a trailing AVA/district when it is
+    explicit. It never invents a parent AVA from a county name.
+    """
+    raw_region = _clean_name(region)
+    raw_subregion = _clean_name(subregion)
+    if not raw_region and not raw_subregion:
+        return "", ""
+
+    text = re.sub(r"^CA\s*[-–—:]\s*", "", raw_region, flags=re.I).strip()
+    text = re.sub(r"\s*\((?:Central Coast|North Coast|California)\)\s*$", "", text, flags=re.I).strip()
+
+    # Common provider wrapper: "Monterey County - San Antonio Valley".
+    if " - " in text:
+        parts = [x.strip() for x in text.split(" - ") if x.strip()]
+        if len(parts) >= 2:
+            trailing = parts[-1]
+            recognized_tail = {
+                "san antonio valley", "san luis obispo coast", "paso robles",
+                "el pomar district", "templeton gap district", "adelaida district",
+                "willow creek district", "geneseo district", "creston district",
+                "estrella district", "san juan creek district", "york mountain",
+            }
+            if _ascii_key(trailing) in recognized_tail:
+                text = trailing
+
+    # Paso-style comma hierarchy: broad AVA + nested district.
+    if "," in text:
+        parts = [x.strip() for x in text.split(",") if x.strip()]
+        if parts:
+            broad = parts[0]
+            narrow = parts[1] if len(parts) > 1 else ""
+            if _ascii_key(broad) == "paso robles" and narrow:
+                return "Paso Robles", narrow
+            if len(parts) == 1:
+                text = broad
+
+    if _ascii_key(text) in {
+        "el pomar district", "templeton gap district", "adelaida district",
+        "willow creek district", "geneseo district", "creston district",
+        "estrella district", "san juan creek district",
+    }:
+        return "Paso Robles", text
+
+    # If the dedicated subregion is useful, keep it unless it duplicates region.
+    if raw_subregion and _ascii_key(raw_subregion) != _ascii_key(text):
+        return text, raw_subregion
+    return text, ""
+
+
+def _finalize_vinoshipper_offer(offer: WineOffer, producer_id: str = "") -> WineOffer:
+    """Last-pass provider normalization immediately before review/staging.
+
+    All VinoShipper paths pass through this function, including rows already
+    extracted successfully upstream. That prevents provider-shape differences
+    from bypassing identity, blend, geography, ABV, and confidence cleanup.
+    """
+    pid = str(producer_id or offer.provider_id or "").strip()
+    offer.provider_id = pid
+    offer.wine = _normalize_wine_label_aliases(_canonical_wine_name(offer.wine, offer.vintage))
+    offer.vintage = str(offer.vintage or "").strip()
+    if re.fullmatch(r"\d{4}\.0", offer.vintage):
+        offer.vintage = offer.vintage[:-2]
+
+    # Normalize provider spelling before applying product-specific verified facts.
+    offer.varietal = _normalize_varietal_aliases(offer.varietal)
+    key = (pid, _ascii_key(offer.wine), offer.vintage)
+    override = _VINOSHIPPER_PRODUCT_OVERRIDES.get(key, {})
+    if override.get("varietal"):
+        offer.varietal = _normalize_varietal_aliases(str(override["varietal"]))
+    if override.get("graph_category"):
+        offer.graph_category = str(override["graph_category"])
+    if override.get("alcohol_pct") is not None:
+        # These values are source-verified fallback facts used only for records
+        # whose provider feed omitted the field.
+        if offer.alcohol_pct is None:
+            offer.alcohol_pct = float(override["alcohol_pct"])
+
+    wine_key = _ascii_key(offer.wine)
+    varietal_key = _ascii_key(offer.varietal)
+
+    # Generic named-blend guardrails. They apply even if the provider supplied a
+    # misleading lead-varietal classification.
+    if "cabernet and merlot blend" in wine_key:
+        offer.varietal = "Cabernet Sauvignon, Merlot"
+        offer.graph_category = "Bordeaux Blend"
+    elif wine_key == "distinctive":
+        if varietal_key in {"distinctive", "distinvtive", "cabernet sauvignon"} and not override.get("varietal"):
+            offer.varietal = ""
+        offer.graph_category = "Red Blend"
+    elif wine_key == "trois" and not override.get("graph_category"):
+        offer.graph_category = "Red Blend"
+    elif wine_key == "le rhone":
+        if varietal_key in {"gsm", "g s m"}:
+            offer.varietal = "Grenache, Syrah, Mourvèdre"
+        offer.graph_category = "Rhône Blend"
+
+    # Recompute graph category only when a verified/specific rule has not already
+    # supplied it, or when the current category is empty/Other.
+    if not offer.graph_category or offer.graph_category == "Other":
+        offer.graph_category = _infer_graph_category(offer.varietal, offer.wine, offer.evidence)
+
+    # Multi-grape compositions should not remain classified as a single varietal.
+    grape_parts = [p.strip() for p in re.split(r"\s*,\s*", offer.varietal or "") if p.strip()]
+    if len(grape_parts) >= 2 and not override.get("graph_category") and offer.graph_category not in {"Bordeaux Blend", "Rhône Blend", "White Blend", "Red Blend", "Zinfandel"}:
+        inferred = _infer_graph_category(offer.varietal, offer.wine, offer.evidence)
+        offer.graph_category = inferred if "Blend" in inferred else "Red Blend"
+
+    offer.general_category = _infer_general_category(offer.graph_category, offer.varietal, offer.wine)
+    offer.region, offer.subregion = _normalize_offer_geography(offer.region, offer.subregion)
+
+    # Reserve/estate/etc. remain whatever the upstream extractor determined unless
+    # the title itself supplies an unambiguous stronger tier.
+    title_key = _ascii_key(offer.wine)
+    if "reserve" in title_key:
+        offer.product_tier = "Reserve"
+
+    has_price = any(x is not None for x in (offer.regular_price, offer.sale_price, offer.club_price))
+    strong_identity = bool(offer.vintage and offer.varietal and offer.graph_category and offer.graph_category != "Other")
+    offer.confidence = "High" if (has_price and strong_identity) else "Moderate"
+    return offer
+
+
+def finalize_vinoshipper_offers(offers: list[WineOffer], producer_id: str = "") -> list[WineOffer]:
+    finalized = [_finalize_vinoshipper_offer(o, producer_id) for o in offers]
+    return _dedupe(finalized)
+
 def _looks_like_vinoshipper_product_node(node: dict[str, Any]) -> bool:
     name = _json_lookup(node, "name", "title", "productName", "wineName", "displayName")
     price = _json_lookup(node, "price", "consumerPrice", "retailPrice", "msrp", "unitPrice")
@@ -801,8 +933,9 @@ def extract_vinoshipper_feed_offers(payload: Any, *, producer_id: str, shop_url:
             single_vineyard=single_vineyard,
             product_tier=tier,
             availability_status=availability,
+            provider_id=str(producer_id),
         ))
-    return _dedupe(results)
+    return finalize_vinoshipper_offers(results, producer_id)
 
 
 def fetch_vinoshipper_product_feed(producer_id: str, shop_url: str) -> list[WineOffer]:
@@ -812,6 +945,7 @@ def fetch_vinoshipper_product_feed(producer_id: str, shop_url: str) -> list[Wine
     endpoint = f"https://vinoshipper.com/api/v3/feeds/vs/{pid}/products"
     payload = _fetch_public_json(endpoint)
     offers = extract_vinoshipper_feed_offers(payload, producer_id=pid, shop_url=shop_url)
+    offers = finalize_vinoshipper_offers(offers, pid)
     if not offers:
         raise CatalogScanError("VinoShipper's product feed returned no dependable priced wine records.")
     return offers
@@ -2123,6 +2257,8 @@ def offers_to_rudder_rows(offers: list[WineOffer], winery: str = "") -> list[dic
     today = date.today().isoformat()
     rows: list[dict[str, Any]] = []
     for offer in offers:
+        if getattr(offer, "provider_id", ""):
+            offer = _finalize_vinoshipper_offer(offer, offer.provider_id)
         selected_price = offer.regular_price or offer.sale_price or offer.club_price
         if selected_price is None:
             continue
