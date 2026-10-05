@@ -32,6 +32,13 @@ from data_loader import (
 from pricing_engine import analyze_wine, normalize_comp_data, canonical_text_key
 from public_data import refresh_all_public_data
 from github_storage import commit_pending_comps, github_storage_status, GitHubStorageError
+from catalog_scraper import (
+    CatalogScanError,
+    WineOffer,
+    scan_catalog,
+    offers_to_rudder_rows,
+    USER_AGENT as CATALOG_USER_AGENT,
+)
 from vision_intake import (
     extract_wine_from_images,
     build_comp_record,
@@ -70,7 +77,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.12</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.13</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -104,7 +111,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.12 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, and reset-safe screenshot intake.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.13 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, and reset-safe screenshot intake.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -397,6 +404,164 @@ elif page == "Data Hub (Admin)":
     c.metric("Market categories", all_data["graph_category"].replace("", np.nan).nunique())
     d.metric("Paso observations", int(all_data["region"].str.contains("Paso", case=False, na=False).sum()))
 
+    st.markdown("### Winery Catalog Scan (Experimental)")
+    st.caption(
+        "Paste one public winery shop/catalog page and Rudder will make a user-initiated, low-request scan for "
+        "wine names and prices. This is an experimental admin tool; review the source's terms/permission before wider use."
+    )
+
+    with st.expander("Catalog scan behavior / safeguards", expanded=False):
+        st.markdown(
+            f"""
+- **Transparent User-Agent:** `{CATALOG_USER_AGENT}`
+- **Scope:** the exact pasted page only; Rudder does not automatically follow product links
+- **robots.txt:** checked before the page is fetched; the result is cached in-process for 24 hours
+- **Access controls / rate limits:** HTTP 401, 403, or 429 stops the scan; there is no bypass or automatic retry
+- **Page size:** maximum 2 MB
+- **JavaScript:** not executed
+- **Assets:** images, CSS, fonts, and scripts are not separately downloaded
+- **Database:** scan results are review-only and are **not automatically added** to the wine-comp database
+
+A first scan of a domain may make two requests: `robots.txt` and the exact catalog page. Later scans normally reuse the cached robots result while the app process remains alive.
+"""
+        )
+
+    if "catalog_scan_nonce" not in st.session_state:
+        st.session_state.catalog_scan_nonce = 0
+    catalog_nonce = int(st.session_state.catalog_scan_nonce)
+
+    cs1, cs2 = st.columns([1, 2.2])
+    with cs1:
+        catalog_winery = st.text_input(
+            "Winery / producer (optional)",
+            placeholder="e.g., Eberle",
+            key=f"catalog_winery_{catalog_nonce}",
+        )
+    with cs2:
+        catalog_url = st.text_input(
+            "Winery shop or catalog URL",
+            placeholder="https://examplewinery.com/shop/",
+            key=f"catalog_url_{catalog_nonce}",
+        )
+
+    scan_col, clear_col = st.columns([3, 1])
+    with scan_col:
+        catalog_scan_clicked = st.button(
+            "Scan this catalog page",
+            type="primary",
+            use_container_width=True,
+            key=f"catalog_scan_btn_{catalog_nonce}",
+        )
+    with clear_col:
+        catalog_clear_clicked = st.button(
+            "Clear catalog scan",
+            use_container_width=True,
+            key=f"catalog_clear_btn_{catalog_nonce}",
+        )
+
+    if catalog_clear_clicked:
+        for key in ["catalog_fetch", "catalog_offers", "catalog_winery_value"]:
+            st.session_state.pop(key, None)
+        st.session_state.catalog_scan_nonce = catalog_nonce + 1
+        st.rerun()
+
+    if catalog_scan_clicked:
+        try:
+            with st.spinner("Checking robots.txt and scanning the exact catalog page…"):
+                fetched, catalog_offers = scan_catalog(catalog_url)
+            st.session_state["catalog_fetch"] = fetched
+            st.session_state["catalog_offers"] = [o.to_dict() for o in catalog_offers]
+            st.session_state["catalog_winery_value"] = catalog_winery.strip()
+        except CatalogScanError as exc:
+            st.error(str(exc))
+
+    catalog_fetch = st.session_state.get("catalog_fetch")
+    catalog_offers_data = st.session_state.get("catalog_offers", [])
+    catalog_saved_winery = st.session_state.get("catalog_winery_value", catalog_winery.strip())
+
+    if catalog_fetch is not None:
+        st.success(
+            f"Fetched exactly 1 catalog page · HTTP {catalog_fetch.status_code} · "
+            f"{catalog_fetch.bytes_read / 1024:.0f} KB · {catalog_fetch.robots_status}. "
+            "No individual product pages were opened automatically."
+        )
+
+    if catalog_offers_data:
+        st.markdown("#### Detected wine offerings")
+        catalog_df = pd.DataFrame(catalog_offers_data)
+        catalog_display_cols = [
+            "wine", "vintage", "regular_price", "sale_price", "club_price",
+            "currency", "product_url", "confidence", "extraction_method",
+        ]
+        catalog_editable = st.data_editor(
+            catalog_df[catalog_display_cols],
+            hide_index=True,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "wine": st.column_config.TextColumn("Wine / product"),
+                "vintage": st.column_config.TextColumn("Vintage / NV"),
+                "regular_price": st.column_config.NumberColumn("Retail / regular", format="$%.2f"),
+                "sale_price": st.column_config.NumberColumn("Sale", format="$%.2f"),
+                "club_price": st.column_config.NumberColumn("Club / member", format="$%.2f"),
+                "product_url": st.column_config.LinkColumn("Product URL"),
+            },
+            key=f"catalog_editor_{catalog_nonce}",
+        )
+        st.caption(
+            "Review the rows before using them. Catalog pages can contain banners, bundles, membership prices, "
+            "or non-wine merchandise. The scanner intentionally does not open the product URLs to fill missing details."
+        )
+
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button(
+                "Download reviewed catalog CSV",
+                catalog_editable.to_csv(index=False).encode("utf-8-sig"),
+                file_name="winery_catalog_scan.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        reconstructed_catalog_offers = []
+        for _, catalog_row in catalog_editable.iterrows():
+            reconstructed_catalog_offers.append(
+                WineOffer(
+                    wine=str(catalog_row.get("wine") or ""),
+                    vintage=str(catalog_row.get("vintage") or ""),
+                    regular_price=None if pd.isna(catalog_row.get("regular_price")) else float(catalog_row.get("regular_price")),
+                    sale_price=None if pd.isna(catalog_row.get("sale_price")) else float(catalog_row.get("sale_price")),
+                    club_price=None if pd.isna(catalog_row.get("club_price")) else float(catalog_row.get("club_price")),
+                    currency=str(catalog_row.get("currency") or "USD"),
+                    product_url=str(catalog_row.get("product_url") or ""),
+                    evidence="Reviewed catalog extraction",
+                    extraction_method=str(catalog_row.get("extraction_method") or "Reviewed"),
+                    confidence=str(catalog_row.get("confidence") or "Moderate"),
+                )
+            )
+        catalog_rudder_rows = pd.DataFrame(
+            offers_to_rudder_rows(reconstructed_catalog_offers, winery=catalog_saved_winery)
+        )
+        with dl2:
+            st.download_button(
+                "Download Rudder-compatible comp CSV",
+                catalog_rudder_rows.to_csv(index=False).encode("utf-8-sig"),
+                file_name="rudder_catalog_comp_import.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        st.info(
+            "The Rudder-compatible export is intentionally basic: it carries the observed wine/price/source fields but "
+            "leaves varietal, category, AVA, tier, Estate, and similar attributes blank for later enrichment/review."
+        )
+    elif catalog_fetch is not None:
+        st.warning(
+            "The page was fetched, but no dependable product + price records were found in its static HTML/JSON-LD. "
+            "The shop may be JavaScript-rendered or may only expose details on individual product pages. "
+            "Rudder stops here rather than escalating to browser automation or automatic product-page crawling."
+        )
+
+    st.divider()
     st.markdown("### Screenshot Intake")
     st.caption("Upload screenshots you manually captured from a wine product/shop page. AI extracts visible facts, then Rudder applies our classification rules. Nothing is saved until you review and approve it.")
 
@@ -838,7 +1003,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.3 approach
+### v0.3.13 approach
 
 Rudder estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
@@ -857,5 +1022,7 @@ Rudder estimates a market-supported bottle-price range from a weighted comparabl
 The model is a market-positioning aid, not a guarantee of demand or sell-through. Winery-specific sales history will be needed before Rudder should make quantitative demand forecasts.
 
 **Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by a Rudder administrator. The AI extracts visible facts only; Rudder applies deterministic classification rules; a human must review/edit the proposed row before it is added to the session comp database.
+
+**Experimental Winery Catalog Scan** makes a user-initiated request only to the exact public catalog/shop page entered by an administrator, after checking `robots.txt`. It does not crawl individual products, execute JavaScript, bypass access controls, or automatically write scan output into the comp database.
         """
     )

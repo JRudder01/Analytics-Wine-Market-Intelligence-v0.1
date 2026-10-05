@@ -1,0 +1,559 @@
+from __future__ import annotations
+
+import ipaddress
+import json
+import re
+import socket
+import time
+import unicodedata
+from dataclasses import dataclass, asdict
+from datetime import date
+from typing import Any, Iterable
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
+
+import requests
+from bs4 import BeautifulSoup, Tag
+
+USER_AGENT = (
+    "RudderAnalytics-WineryCatalogCollector/0.1 "
+    "(user-initiated catalog research; contact via project owner)"
+)
+MAX_HTML_BYTES = 2_000_000
+REQUEST_TIMEOUT = (5, 12)
+ROBOTS_TTL_SECONDS = 24 * 60 * 60
+MAX_REDIRECTS = 3
+
+_ROBOTS_CACHE: dict[str, tuple[float, RobotFileParser | None, str]] = {}
+
+PRICE_RE = re.compile(
+    r"(?:(retail|msrp|regular|list|sale|club|member|membership|wine\s+society)\s*(?:price)?\s*[:\-]?\s*)?"
+    r"\$\s*([0-9]{1,4}(?:\.[0-9]{1,2})?)",
+    re.I,
+)
+VINTAGE_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+NV_RE = re.compile(r"(?:^|\b)(?:NV|N\.V\.|NON[- ]?VINTAGE)(?:\b|$)", re.I)
+
+
+class CatalogScanError(RuntimeError):
+    pass
+
+
+@dataclass
+class CatalogFetch:
+    requested_url: str
+    final_url: str
+    status_code: int
+    content_type: str
+    html: str
+    bytes_read: int
+    robots_status: str
+    user_agent: str = USER_AGENT
+
+
+@dataclass
+class WineOffer:
+    wine: str
+    vintage: str
+    regular_price: float | None
+    sale_price: float | None
+    club_price: float | None
+    currency: str
+    product_url: str
+    evidence: str
+    extraction_method: str
+    confidence: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _ascii_key(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _is_public_ip(addr: str) -> bool:
+    ip = ipaddress.ip_address(addr)
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def validate_public_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        raise CatalogScanError("Enter a public winery shop/catalog URL first.")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise CatalogScanError("Use a complete public http:// or https:// URL.")
+    host = parsed.hostname.casefold()
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        raise CatalogScanError("Local/private network URLs are not supported.")
+    try:
+        infos = socket.getaddrinfo(
+            parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror as exc:
+        raise CatalogScanError(f"Could not resolve the hostname: {exc}") from exc
+    addresses = {info[4][0] for info in infos}
+    if not addresses or any(not _is_public_ip(addr) for addr in addresses):
+        raise CatalogScanError("The URL resolves to a private/reserved network address.")
+    return url
+
+
+def _request_headers() -> dict[str, str]:
+    return {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.5,*/*;q=0.1",
+        "Accept-Language": "en-US,en;q=0.8",
+        "Connection": "close",
+    }
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _site_key(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _get_robots(url: str) -> tuple[RobotFileParser | None, str]:
+    origin = _origin(url)
+    cache_key = origin.casefold()
+    now = time.time()
+    cached = _ROBOTS_CACHE.get(cache_key)
+    if cached and now - cached[0] < ROBOTS_TTL_SECONDS:
+        return cached[1], f"cached: {cached[2]}"
+
+    robots_url = urljoin(origin + "/", "robots.txt")
+    try:
+        response = requests.get(
+            robots_url,
+            headers=_request_headers(),
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise CatalogScanError(
+            f"Could not verify robots.txt safely ({exc}); scan stopped."
+        ) from exc
+
+    if response.status_code == 404:
+        _ROBOTS_CACHE[cache_key] = (now, None, "robots.txt not published (404)")
+        return None, "robots.txt not published (404)"
+    if response.status_code in {401, 403}:
+        raise CatalogScanError("The site denied access to robots.txt; scan stopped.")
+    if response.status_code >= 400:
+        raise CatalogScanError(
+            f"robots.txt returned HTTP {response.status_code}; scan stopped rather than guessing permission."
+        )
+
+    parser = RobotFileParser()
+    parser.set_url(robots_url)
+    parser.parse(response.text.splitlines())
+    status = "robots.txt checked"
+    _ROBOTS_CACHE[cache_key] = (now, parser, status)
+    return parser, status
+
+
+def _read_response(response: requests.Response) -> tuple[str, int, str]:
+    content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().casefold()
+    if content_type and content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
+        raise CatalogScanError(f"The URL returned {content_type!r}, not HTML/text.")
+
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_HTML_BYTES:
+                raise CatalogScanError("The page is larger than the collector's 2 MB safety limit.")
+        except ValueError:
+            pass
+
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > MAX_HTML_BYTES:
+            raise CatalogScanError("The page exceeded the 2 MB safety limit while downloading.")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    encoding = response.encoding or "utf-8"
+    try:
+        text = raw.decode(encoding, errors="replace")
+    except LookupError:
+        text = raw.decode("utf-8", errors="replace")
+    return text, total, content_type or "text/html"
+
+
+def fetch_catalog_page(url: str) -> CatalogFetch:
+    """Fetch only the exact user-entered page (plus robots.txt if not cached).
+
+    This function does not crawl links, execute JavaScript, load images/CSS, retry
+    403/429 responses, or bypass access controls.
+    """
+    requested = validate_public_url(url)
+    robots, robots_status = _get_robots(requested)
+    if robots is not None and not robots.can_fetch(USER_AGENT, requested):
+        raise CatalogScanError("robots.txt disallows this page for Rudder's user agent.")
+
+    current = requested
+    original_site = _site_key(requested)
+    for redirect_number in range(MAX_REDIRECTS + 1):
+        validate_public_url(current)
+        try:
+            response = requests.get(
+                current,
+                headers=_request_headers(),
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise CatalogScanError(f"Catalog request failed: {exc}") from exc
+
+        if response.status_code in {301, 302, 303, 307, 308}:
+            if redirect_number >= MAX_REDIRECTS:
+                raise CatalogScanError("The URL redirected too many times.")
+            location = response.headers.get("Location")
+            if not location:
+                raise CatalogScanError("Redirect had no destination.")
+            redirected = urljoin(current, location)
+            validate_public_url(redirected)
+            if _site_key(redirected) != original_site:
+                raise CatalogScanError("The page redirected to a different site; scan stopped.")
+            current = redirected
+            continue
+
+        if response.status_code in {401, 403}:
+            raise CatalogScanError(
+                f"The site returned HTTP {response.status_code}; the collector will not bypass it."
+            )
+        if response.status_code == 429:
+            raise CatalogScanError("The site returned HTTP 429; the collector will not retry automatically.")
+        if response.status_code >= 400:
+            raise CatalogScanError(f"The catalog page returned HTTP {response.status_code}.")
+
+        html, bytes_read, content_type = _read_response(response)
+        return CatalogFetch(
+            requested_url=requested,
+            final_url=current,
+            status_code=response.status_code,
+            content_type=content_type,
+            html=html,
+            bytes_read=bytes_read,
+            robots_status=robots_status,
+        )
+
+    raise CatalogScanError("The catalog page could not be fetched.")
+
+
+def _iter_json_nodes(value: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _iter_json_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_json_nodes(child)
+
+
+def _types(node: dict[str, Any]) -> set[str]:
+    value = node.get("@type")
+    if isinstance(value, str):
+        return {value.casefold()}
+    if isinstance(value, list):
+        return {str(v).casefold() for v in value}
+    return set()
+
+
+def _clean_name(name: Any) -> str:
+    text = re.sub(r"\s+", " ", str(name or "")).strip(" -|\t\r\n")
+    return text[:180]
+
+
+def _vintage_from_name(name: str) -> str:
+    match = VINTAGE_RE.search(name)
+    if match:
+        return match.group(1)
+    if NV_RE.search(name):
+        return "NV"
+    return ""
+
+
+def _coerce_price(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    match = re.search(r"[0-9]+(?:\.[0-9]{1,2})?", str(value).replace(",", ""))
+    if not match:
+        return None
+    try:
+        price = float(match.group(0))
+    except ValueError:
+        return None
+    if price <= 0 or price > 5000:
+        return None
+    return round(price, 2)
+
+
+def _offer_prices(offers: Any) -> tuple[float | None, float | None, float | None, str]:
+    regular = sale = club = None
+    currency = "USD"
+    candidates = offers if isinstance(offers, list) else [offers]
+    for offer in candidates:
+        if not isinstance(offer, dict):
+            continue
+        currency = str(offer.get("priceCurrency") or currency)
+        price = _coerce_price(offer.get("price") or offer.get("lowPrice"))
+        if price is None:
+            continue
+        label = " ".join(
+            str(offer.get(k) or "") for k in ("name", "description", "category", "priceSpecification")
+        ).casefold()
+        if any(word in label for word in ("club", "member", "society")):
+            club = price if club is None else min(club, price)
+        elif any(word in label for word in ("sale", "discount", "clearance")):
+            sale = price if sale is None else min(sale, price)
+        elif regular is None:
+            regular = price
+    return regular, sale, club, currency
+
+
+def _extract_jsonld(soup: BeautifulSoup, base_url: str) -> list[WineOffer]:
+    offers: list[WineOffer] = []
+    for script in soup.find_all("script", attrs={"type": re.compile(r"application/ld\+json", re.I)}):
+        raw = script.string or script.get_text(" ", strip=True)
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        for node in _iter_json_nodes(data):
+            if "product" not in _types(node):
+                continue
+            name = _clean_name(node.get("name"))
+            if not name:
+                continue
+            regular, sale, club, currency = _offer_prices(node.get("offers"))
+            if regular is None and sale is None and club is None:
+                continue
+            product_url = urljoin(base_url, str(node.get("url") or "")) or base_url
+            evidence = _clean_name(node.get("description"))[:360]
+            offers.append(
+                WineOffer(
+                    wine=name,
+                    vintage=_vintage_from_name(name),
+                    regular_price=regular,
+                    sale_price=sale,
+                    club_price=club,
+                    currency=currency,
+                    product_url=product_url,
+                    evidence=evidence or "JSON-LD Product",
+                    extraction_method="JSON-LD",
+                    confidence="High",
+                )
+            )
+    return offers
+
+
+def _classify_prices(text: str) -> tuple[float | None, float | None, float | None]:
+    regular = sale = club = None
+    matches = list(PRICE_RE.finditer(text))
+    for match in matches:
+        label = (match.group(1) or "").casefold()
+        price = _coerce_price(match.group(2))
+        if price is None:
+            continue
+        if any(word in label for word in ("club", "member", "membership", "society")):
+            club = price if club is None else min(club, price)
+        elif "sale" in label:
+            sale = price if sale is None else min(sale, price)
+        elif regular is None:
+            regular = price
+        elif price < regular and sale is None:
+            # Multiple unlabeled prices often means current/sale + struck list price.
+            sale = price
+        elif price > regular:
+            regular, sale = price, regular if sale is None else sale
+    return regular, sale, club
+
+
+def _candidate_parent(anchor: Tag) -> Tag | None:
+    # Use the *smallest* nearby container that contains a price so one product
+    # card cannot absorb prices from sibling products higher in the DOM tree.
+    node: Tag | None = anchor
+    for _ in range(5):
+        if node is None or not isinstance(node, Tag):
+            break
+        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True))
+        if len(text) > 1200:
+            break
+        if PRICE_RE.search(text):
+            return node
+        node = node.parent if isinstance(node.parent, Tag) else None
+    return None
+
+
+def _extract_html_cards(soup: BeautifulSoup, base_url: str) -> list[WineOffer]:
+    results: list[WineOffer] = []
+    for anchor in soup.find_all("a", href=True):
+        name = _clean_name(anchor.get_text(" ", strip=True))
+        href = str(anchor.get("href") or "").strip()
+        if not name or len(name) < 3 or len(name) > 160:
+            continue
+        if href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        parent = _candidate_parent(anchor)
+        if parent is None:
+            continue
+        text = re.sub(r"\s+", " ", parent.get_text(" ", strip=True))
+        if not PRICE_RE.search(text):
+            continue
+        regular, sale, club = _classify_prices(text)
+        if regular is None and sale is None and club is None:
+            continue
+        url = urljoin(base_url, href)
+        if _site_key(url) != _site_key(base_url):
+            continue
+        # Filter generic navigation/cart anchors by requiring wine-like context.
+        context_key = _ascii_key(text)
+        name_key = _ascii_key(name)
+        generic = {"shop", "wines", "wine", "buy", "add to cart", "learn more", "view", "details"}
+        if name_key in generic:
+            continue
+        wine_tokens = ("wine", "cabernet", "chardonnay", "pinot", "syrah", "grenache", "sauvignon", "riesling", "rose", "zinfandel", "viognier", "merlot", "blend", "bottle", "vintage", "blanc", "rouge", "barbera", "sangiovese", "tempranillo", "vermentino", "albarino", "albariño")
+        class_text = " ".join(str(x) for x in (parent.get("class") or [])) + " " + str(parent.get("id") or "")
+        looks_like_product_container = any(tok in class_text.casefold() for tok in ("product", "wine", "shop", "item", "card"))
+        if not any(token in context_key for token in wine_tokens):
+            # Still allow product-card links or names with a visible vintage;
+            # final rows remain reviewable/editable before export.
+            if not VINTAGE_RE.search(text) and not looks_like_product_container:
+                continue
+        results.append(
+            WineOffer(
+                wine=name,
+                vintage=_vintage_from_name(name) or _vintage_from_name(text),
+                regular_price=regular,
+                sale_price=sale,
+                club_price=club,
+                currency="USD",
+                product_url=url,
+                evidence=text[:420],
+                extraction_method="HTML card",
+                confidence="Moderate",
+            )
+        )
+    return results
+
+
+def _dedupe(offers: list[WineOffer]) -> list[WineOffer]:
+    by_key: dict[tuple[str, str], WineOffer] = {}
+    for offer in offers:
+        key = (_ascii_key(offer.wine), _ascii_key(offer.product_url))
+        current = by_key.get(key)
+        if current is None:
+            by_key[key] = offer
+            continue
+        # Prefer structured evidence, then fill missing price fields.
+        if offer.extraction_method == "JSON-LD" and current.extraction_method != "JSON-LD":
+            preferred, other = offer, current
+        else:
+            preferred, other = current, offer
+        for field in ("regular_price", "sale_price", "club_price"):
+            if getattr(preferred, field) is None and getattr(other, field) is not None:
+                setattr(preferred, field, getattr(other, field))
+        if not preferred.vintage and other.vintage:
+            preferred.vintage = other.vintage
+        by_key[key] = preferred
+
+    # A second pass merges same label/vintage when one parser found a slightly different URL.
+    final: dict[tuple[str, str], WineOffer] = {}
+    for offer in by_key.values():
+        key = (_ascii_key(offer.wine), offer.vintage)
+        current = final.get(key)
+        if current is None:
+            final[key] = offer
+            continue
+        for field in ("regular_price", "sale_price", "club_price"):
+            if getattr(current, field) is None and getattr(offer, field) is not None:
+                setattr(current, field, getattr(offer, field))
+        if current.extraction_method != "JSON-LD" and offer.extraction_method == "JSON-LD":
+            current.extraction_method = "JSON-LD + HTML"
+            current.confidence = "High"
+        elif current.extraction_method != offer.extraction_method:
+            current.extraction_method = "JSON-LD + HTML"
+        if len(offer.evidence) > len(current.evidence):
+            current.evidence = offer.evidence
+        final[key] = current
+
+    return sorted(final.values(), key=lambda o: (_ascii_key(o.wine), o.vintage))
+
+
+def extract_catalog_offers(html: str, base_url: str) -> list[WineOffer]:
+    soup = BeautifulSoup(html, "html.parser")
+    structured = _extract_jsonld(soup, base_url)
+    cards = _extract_html_cards(soup, base_url)
+    return _dedupe(structured + cards)
+
+
+def scan_catalog(url: str) -> tuple[CatalogFetch, list[WineOffer]]:
+    fetched = fetch_catalog_page(url)
+    offers = extract_catalog_offers(fetched.html, fetched.final_url)
+    return fetched, offers
+
+
+def offers_to_rudder_rows(offers: list[WineOffer], winery: str = "") -> list[dict[str, Any]]:
+    today = date.today().isoformat()
+    rows: list[dict[str, Any]] = []
+    for offer in offers:
+        selected_price = offer.regular_price or offer.sale_price or offer.club_price
+        if selected_price is None:
+            continue
+        if offer.regular_price is not None:
+            price_type = "Winery retail"
+        elif offer.sale_price is not None:
+            price_type = "Promotion / sale"
+        else:
+            price_type = "Club / member"
+        rows.append({
+            "winery": winery,
+            "wine": offer.wine,
+            "vintage": offer.vintage,
+            "varietal": "",
+            "graph_category": "",
+            "general_category": "",
+            "region": "",
+            "subregion": "",
+            "price": selected_price,
+            "price_type": price_type,
+            "critic": "",
+            "critic_score": "",
+            "cases_produced": "",
+            "alcohol_pct": "",
+            "estate": False,
+            "single_vineyard": False,
+            "product_tier": "",
+            "source_name": winery,
+            "source_url": offer.product_url,
+            "price_date": today,
+            "data_confidence": offer.confidence,
+        })
+    return rows
