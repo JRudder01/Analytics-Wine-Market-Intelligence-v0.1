@@ -830,3 +830,168 @@ def test_left_bank_complex_bordeaux_composition_remains_bordeaux_blend():
     assert o.general_category == "Red"
     assert o.sale_price is None
     assert "31% Cabernet Sauvignon" in o.varietal
+
+
+def test_ai_auto_policy_skips_complete_high_jsonld_but_uses_legacy():
+    from catalog_scraper import WineOffer, should_use_ai_for_product_page
+    structured = WineOffer(
+        wine="Cabernet Sauvignon", vintage="2023", regular_price=50.0,
+        sale_price=None, club_price=None, currency="USD",
+        product_url="https://example.com/cab", evidence="JSON-LD Product",
+        extraction_method="JSON-LD", confidence="High",
+        varietal="Cabernet Sauvignon", graph_category="Cabernet Sauvignon",
+        general_category="Red", region="Paso Robles", alcohol_pct=14.5,
+    )
+    assert should_use_ai_for_product_page([structured], "auto") is False
+
+    legacy = WineOffer(
+        wine="Cabernet Sauvignon", vintage="2023", regular_price=50.0,
+        sale_price=45.0, club_price=50.0, currency="USD",
+        product_url="https://legacy.example.com/cab", evidence="legacy text",
+        extraction_method="Selected product page fallback", confidence="Moderate",
+    )
+    assert should_use_ai_for_product_page([legacy], "auto") is True
+    assert should_use_ai_for_product_page([legacy], "off") is False
+    assert should_use_ai_for_product_page([structured], "always") is True
+
+
+def test_ai_merge_clears_legacy_quantity_discount_and_navigation_contamination():
+    from catalog_scraper import WineOffer, merge_ai_product_result
+    legacy = WineOffer(
+        wine="2022 G-S-M Red Blend", vintage="2022", regular_price=40.0,
+        sale_price=36.0, club_price=40.0, currency="USD",
+        product_url="https://legacy.example.com/gsm", evidence="WHITE & ROSÉ WINES ...",
+        extraction_method="Selected product page fallback", confidence="Moderate",
+        varietal="", graph_category="Rosé", general_category="Rosé",
+    )
+    ai = {
+        "wine": "G-S-M Red Blend", "vintage": 2022,
+        "regular_price": 40.0, "sale_price": None, "club_price": None,
+        "currency": "USD", "varietal": "Grenache, Syrah, Mourvèdre",
+        "graph_category": "Rhône Blend", "general_category": "Red",
+        "region": None, "subregion": None, "alcohol_pct": None,
+        "cases_produced": None, "estate_status": "Unknown",
+        "single_vineyard_status": "Unknown", "product_tier": "Core",
+        "availability_status": None, "overall_confidence": "Moderate",
+        "evidence": {
+            "wine": "2022 G-S-M Red Blend", "vintage": "2022",
+            "regular_price": "$40.00", "sale_price": None, "club_price": None,
+            "varietal": "Grenache, Syrah, and Mourvèdre", "region": None,
+            "subregion": None, "alcohol_pct": None, "cases_produced": None,
+            "estate_status": None, "single_vineyard_status": None,
+            "product_tier": None, "availability_status": None,
+        },
+        "warnings": ["12+ bottle price is a quantity discount, not a sale."],
+    }
+    out = merge_ai_product_result([legacy], ai, legacy.product_url)[0]
+    assert out.regular_price == 40.0
+    assert out.sale_price is None
+    assert out.club_price is None
+    assert out.graph_category == "Rhône Blend"
+    assert out.general_category == "Red"
+    assert out.varietal == "Grenache, Syrah, Mourvèdre"
+    assert "AI" in out.extraction_method
+
+
+def test_ai_merge_preserves_high_structured_price_identity():
+    from catalog_scraper import WineOffer, merge_ai_product_result
+    structured = WineOffer(
+        wine="Cabernet Sauvignon", vintage="2023", regular_price=70.0,
+        sale_price=None, club_price=None, currency="USD",
+        product_url="https://modern.example.com/cab", evidence="JSON-LD Product",
+        extraction_method="JSON-LD", confidence="High",
+        varietal="Cabernet Sauvignon", graph_category="Cabernet Sauvignon",
+        general_category="Red", region="Napa Valley",
+    )
+    ai = {
+        "wine": "Cabernet", "vintage": 2023,
+        "regular_price": 65.0, "sale_price": None, "club_price": None,
+        "currency": "USD", "varietal": "Cabernet Sauvignon",
+        "graph_category": "Cabernet Sauvignon", "general_category": "Red",
+        "region": "Napa Valley", "subregion": "Oak Knoll District",
+        "alcohol_pct": 14.3, "cases_produced": 1278,
+        "estate_status": "Unknown", "single_vineyard_status": "Unknown",
+        "product_tier": "Core", "availability_status": "Available",
+        "overall_confidence": "High",
+        "evidence": {
+            "wine": "Cabernet", "vintage": "2023", "regular_price": "$65",
+            "sale_price": None, "club_price": None,
+            "varietal": "Cabernet Sauvignon", "region": "Napa Valley",
+            "subregion": "Oak Knoll District", "alcohol_pct": "14.3%",
+            "cases_produced": "1,278 cases", "estate_status": None,
+            "single_vineyard_status": None, "product_tier": None,
+            "availability_status": "Add to cart",
+        },
+        "warnings": [],
+    }
+    out = merge_ai_product_result([structured], ai, structured.product_url)[0]
+    assert out.wine == "Cabernet Sauvignon"
+    assert out.regular_price == 70.0
+    assert out.subregion == "Oak Knoll District"
+    assert out.alcohol_pct == 14.3
+    assert out.extraction_method == "JSON-LD + AI enrichment"
+
+
+def test_ai_page_evidence_prefers_product_component_over_navigation():
+    from catalog_scraper import build_ai_page_evidence
+    html = '''
+    <html><body>
+      <nav>WHITE & ROSÉ WINES RED WINES CLUB GIFTS</nav>
+      <div class="product-detail">
+        <h1>2023 Five Sisters Cabernet Sauvignon</h1>
+        <div>Price: $49.00</div>
+        <p>Estate Five Sisters Blend. 85% Cabernet Sauvignon, 7% Malbec.</p>
+      </div>
+      <footer>WHITE & ROSÉ WINES</footer>
+    </body></html>
+    '''
+    evidence = build_ai_page_evidence(html, "https://legacy.example.com/five-sisters")
+    assert evidence["text_scope"] == "product-container"
+    assert "Five Sisters Cabernet Sauvignon" in evidence["product_local_text"]
+    assert "WHITE & ROSÉ WINES" not in evidence["product_local_text"]
+
+
+def test_selected_page_ai_path_uses_fake_extractor_without_extra_site_logic(monkeypatch):
+    import catalog_scraper as cs
+
+    html = '''<html><body><div class="product-detail"><h1>2023 Left Bank Cuvée</h1>
+    <div>Price: $43.00</div><p>31% Cabernet Sauvignon, 26% Petit Verdot, 24% Malbec,
+    11% Merlot, 8% Cabernet Franc.</p><div>1 - 11 $43.00 12 + $38.70</div></div></body></html>'''
+
+    fetch = cs.CatalogFetch(
+        requested_url="https://legacy.example.com/left-bank", final_url="https://legacy.example.com/left-bank",
+        status_code=200, content_type="text/html", html=html, bytes_read=len(html), robots_status="robots.txt allows this URL"
+    )
+    monkeypatch.setattr(cs, "validate_public_url", lambda url: url)
+    monkeypatch.setattr(cs, "fetch_catalog_page", lambda url: fetch)
+
+    calls = []
+    def fake_ai(evidence_payload, **kwargs):
+        calls.append(evidence_payload)
+        return {
+            "wine": "Left Bank Cuvée", "vintage": 2023, "regular_price": 43.0,
+            "sale_price": None, "club_price": None, "currency": "USD",
+            "varietal": "31% Cabernet Sauvignon, 26% Petit Verdot, 24% Malbec, 11% Merlot, 8% Cabernet Franc",
+            "graph_category": "Bordeaux Blend", "general_category": "Red",
+            "region": None, "subregion": None, "alcohol_pct": None, "cases_produced": None,
+            "estate_status": "Unknown", "single_vineyard_status": "Unknown",
+            "product_tier": "Core", "availability_status": None,
+            "overall_confidence": "Moderate",
+            "evidence": {k: None for k in [
+                "wine", "vintage", "regular_price", "sale_price", "club_price", "varietal",
+                "region", "subregion", "alcohol_pct", "cases_produced", "estate_status",
+                "single_vineyard_status", "product_tier", "availability_status"
+            ]},
+            "warnings": [],
+        }
+
+    offers, failures, fetched_count = cs.scan_selected_product_pages(
+        ["https://legacy.example.com/left-bank"], delay_seconds=0,
+        ai_mode="always", producer_hint="J. Rickards Winery", ai_extractor=fake_ai,
+    )
+    assert fetched_count == 1
+    assert len(calls) == 1
+    assert len(offers) == 1
+    assert offers[0].graph_category == "Bordeaux Blend"
+    assert offers[0].sale_price is None
+    assert not failures

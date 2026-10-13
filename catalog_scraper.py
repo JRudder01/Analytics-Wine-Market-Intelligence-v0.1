@@ -20,7 +20,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
-CATALOG_PARSER_BUILD = "v0.3.28"
+CATALOG_PARSER_BUILD = "v0.4.0"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
@@ -2512,6 +2512,236 @@ def _product_local_text(soup: BeautifulSoup, title: str) -> tuple[str, str]:
     return _clean_product_node_text(soup), "page-fallback"
 
 
+
+
+def build_ai_page_evidence(html: str, base_url: str) -> dict[str, Any]:
+    """Build a bounded evidence bundle from HTML already fetched by the scanner.
+
+    This function performs no network or AI calls. It intentionally prefers the
+    same focused product component used by the deterministic parser and includes
+    only Product-like JSON-LD nodes rather than shipping the whole page to AI.
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    title = ""
+    heading = soup.find("h1")
+    if heading:
+        title = _clean_name(heading.get_text(" ", strip=True))
+    if not title:
+        og = soup.find("meta", attrs={"property": "og:title"})
+        if og and og.get("content"):
+            title = _clean_name(str(og.get("content")))
+    if not title and soup.title:
+        title = _clean_name(soup.title.get_text(" ", strip=True))
+
+    local_text, authority = _product_local_text(soup, title)
+    local_text = re.sub(r"\s+", " ", local_text).strip()[:18000]
+
+    product_nodes: list[dict[str, Any]] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            kind = value.get("@type")
+            kinds = [kind] if isinstance(kind, str) else (kind if isinstance(kind, list) else [])
+            if any(str(x).casefold() == "product" for x in kinds):
+                compact: dict[str, Any] = {}
+                for key in (
+                    "name", "description", "sku", "category", "brand", "offers",
+                    "additionalProperty", "productionDate", "releaseDate",
+                ):
+                    if key in value:
+                        compact[key] = value[key]
+                product_nodes.append(compact)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+        raw = script.string or script.get_text(" ", strip=True)
+        if not raw:
+            continue
+        try:
+            walk(json.loads(raw))
+        except Exception:
+            continue
+        if len(product_nodes) >= 4:
+            break
+
+    # Bound nested structured data too; this is evidence for interpretation, not
+    # an archival copy of the page.
+    bounded_nodes: list[Any] = []
+    for node in product_nodes[:4]:
+        try:
+            encoded = json.dumps(node, ensure_ascii=False)
+            if len(encoded) > 6000:
+                encoded = encoded[:6000]
+            bounded_nodes.append(json.loads(encoded) if encoded.endswith("}") else {"summary": encoded})
+        except Exception:
+            continue
+
+    return {
+        "page_url": base_url,
+        "page_title": title,
+        "text_scope": authority,
+        "structured_product_data": bounded_nodes,
+        "product_local_text": local_text,
+    }
+
+
+def _offer_ai_missing_score(offer: WineOffer) -> int:
+    """Count important facts absent from a deterministic product-page record."""
+    missing = 0
+    for value in (offer.varietal, offer.region):
+        if not str(value or "").strip():
+            missing += 1
+    if not offer.graph_category or offer.graph_category == "Other":
+        missing += 1
+    if offer.alcohol_pct is None:
+        missing += 1
+    if not offer.vintage:
+        missing += 1
+    return missing
+
+
+def should_use_ai_for_product_page(offers: list[WineOffer], ai_mode: str = "auto") -> bool:
+    """Return whether one selected product page should receive AI interpretation.
+
+    Auto mode leaves strong/complete JSON-LD alone, but uses AI for legacy/noisy
+    pages, failed deterministic extraction, or materially incomplete structured
+    records. This keeps AI as an interpretation fallback rather than replacing
+    authoritative provider/structured facts.
+    """
+    mode = str(ai_mode or "auto").casefold()
+    if mode in {"off", "disabled", "deterministic"}:
+        return False
+    if mode in {"always", "all"}:
+        return True
+    if not offers:
+        return True
+    best = offers[0]
+    structured_high = (
+        str(best.extraction_method or "").casefold() == "json-ld"
+        and str(best.confidence or "").casefold() == "high"
+    )
+    if structured_high and _offer_ai_missing_score(best) <= 1:
+        return False
+    return True
+
+
+def _ai_evidence_summary(result: dict[str, Any]) -> str:
+    evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else {}
+    pieces = []
+    for key in (
+        "wine", "regular_price", "sale_price", "club_price", "varietal", "region",
+        "subregion", "alcohol_pct", "cases_produced", "estate_status",
+        "single_vineyard_status", "product_tier", "availability_status",
+    ):
+        val = str(evidence.get(key) or "").strip()
+        if val:
+            pieces.append(f"{key}: {val}")
+    warnings = [str(x).strip() for x in (result.get("warnings") or []) if str(x).strip()]
+    summary = "AI evidence — " + " | ".join(pieces[:12]) if pieces else "AI-assisted interpretation"
+    if warnings:
+        summary += " | Warnings: " + "; ".join(warnings[:5])
+    return summary[:1800]
+
+
+def merge_ai_product_result(
+    deterministic_offers: list[WineOffer],
+    ai_result: dict[str, Any],
+    base_url: str,
+) -> list[WineOffer]:
+    """Merge semantic AI interpretation with deterministic product facts.
+
+    Strong JSON-LD identity/pricing is preserved. For legacy/unstructured pages,
+    AI owns semantic classification and price *type* distinctions, while a known
+    regular price can still be retained when the model leaves it blank.
+    """
+    baseline = deterministic_offers[0] if deterministic_offers else None
+    structured_high = bool(
+        baseline
+        and str(baseline.extraction_method or "").casefold() == "json-ld"
+        and str(baseline.confidence or "").casefold() == "high"
+    )
+
+    def choose_ai(field: str, fallback: Any = None) -> Any:
+        value = ai_result.get(field)
+        return fallback if value in (None, "") else value
+
+    if baseline:
+        wine = baseline.wine if structured_high else choose_ai("wine", baseline.wine)
+        vintage = baseline.vintage if structured_high and baseline.vintage else str(choose_ai("vintage", baseline.vintage) or "")
+        regular = baseline.regular_price if structured_high and baseline.regular_price is not None else choose_ai("regular_price", baseline.regular_price)
+        if structured_high:
+            sale = baseline.sale_price if baseline.sale_price is not None else ai_result.get("sale_price")
+            club = baseline.club_price if baseline.club_price is not None else ai_result.get("club_price")
+        else:
+            # AI is explicitly responsible for distinguishing quantity/case tiers
+            # from sale/member pricing on unstructured legacy pages. Null clears a
+            # deterministic misclassification rather than preserving it.
+            sale = ai_result.get("sale_price")
+            club = ai_result.get("club_price")
+        currency = choose_ai("currency", baseline.currency) or "USD"
+    else:
+        wine = ai_result.get("wine") or ""
+        vintage = str(ai_result.get("vintage") or "")
+        regular = ai_result.get("regular_price")
+        sale = ai_result.get("sale_price")
+        club = ai_result.get("club_price")
+        currency = ai_result.get("currency") or "USD"
+
+    if not wine or not any(x is not None for x in (regular, sale, club)):
+        return deterministic_offers
+
+    fallback = baseline
+    def semantic(field: str, default: Any = "") -> Any:
+        ai_value = ai_result.get(field)
+        if ai_value not in (None, ""):
+            return ai_value
+        return getattr(fallback, field, default) if fallback else default
+
+    estate_status = ai_result.get("estate_status")
+    single_status = ai_result.get("single_vineyard_status")
+    if structured_high and fallback:
+        estate = bool(fallback.estate or estate_status == "Yes")
+        single = bool(fallback.single_vineyard or single_status == "Yes")
+    else:
+        estate = estate_status == "Yes"
+        single = single_status == "Yes"
+
+    method = "JSON-LD + AI enrichment" if structured_high else "AI-assisted product page"
+    confidence = str(ai_result.get("overall_confidence") or (fallback.confidence if fallback else "Moderate"))
+    offer = WineOffer(
+        wine=str(wine or ""),
+        vintage=str(vintage or ""),
+        regular_price=regular,
+        sale_price=sale,
+        club_price=club,
+        currency=str(currency or "USD"),
+        product_url=base_url,
+        evidence=_ai_evidence_summary(ai_result),
+        extraction_method=method,
+        confidence=confidence,
+        varietal=str(semantic("varietal", "") or ""),
+        graph_category=str(semantic("graph_category", "") or ""),
+        general_category=str(semantic("general_category", "") or ""),
+        region=str(semantic("region", "") or ""),
+        subregion=str(semantic("subregion", "") or ""),
+        alcohol_pct=semantic("alcohol_pct", None),
+        cases_produced=semantic("cases_produced", None),
+        estate=estate,
+        single_vineyard=single,
+        product_tier=str(semantic("product_tier", "Core") or "Core"),
+        availability_status=(
+            str(ai_result.get("availability_status") or "")
+            if not structured_high
+            else str(semantic("availability_status", "") or "")
+        ),
+        provider_id=str(getattr(fallback, "provider_id", "") or "") if fallback else "",
+    )
+    return finalize_catalog_offers([offer])
+
 def _merge_metadata(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
     """Merge metadata with structured/description evidence taking precedence."""
     out: dict[str, Any] = {}
@@ -2658,9 +2888,22 @@ def merge_offers(offers: list[WineOffer]) -> list[WineOffer]:
 
 
 def scan_selected_product_pages(
-    urls: list[str], *, delay_seconds: float = 0.9, max_pages: int = 12
+    urls: list[str],
+    *,
+    delay_seconds: float = 0.9,
+    max_pages: int = 12,
+    ai_mode: str = "off",
+    producer_hint: str = "",
+    ai_model: str | None = None,
+    ai_extractor=None,
 ) -> tuple[list[WineOffer], list[dict[str, str]], int]:
-    """Fetch only pages the user explicitly selected, once each, sequentially."""
+    """Fetch only pages the user explicitly selected, once each, sequentially.
+
+    When ``ai_mode`` is ``auto`` or ``always``, AI receives only the HTML/text
+    already fetched here; it never makes a second website request. Auto mode uses
+    AI as an interpretation fallback for legacy/noisy/incomplete pages while
+    leaving strong, complete JSON-LD records alone.
+    """
     unique_urls = []
     seen = set()
     for raw in urls:
@@ -2688,11 +2931,41 @@ def scan_selected_product_pages(
             fetched_count += 1
             page_offers = _extract_product_page_offers(fetched.html, fetched.final_url)
             if not page_offers:
-                # Reuse the catalog parser as a fallback for unusually structured pages.
+                # Reuse the generic catalog parser before AI so structured/static
+                # evidence is always attempted first.
                 page_offers = extract_catalog_offers(fetched.html, fetched.final_url)
+
+            if should_use_ai_for_product_page(page_offers, ai_mode):
+                try:
+                    if ai_extractor is None:
+                        from ai_catalog_extractor import extract_catalog_record_with_ai
+                        extractor = extract_catalog_record_with_ai
+                    else:
+                        extractor = ai_extractor
+                    evidence_payload = build_ai_page_evidence(fetched.html, fetched.final_url)
+                    deterministic_candidate = page_offers[0].to_dict() if page_offers else None
+                    ai_result = extractor(
+                        evidence_payload,
+                        producer_hint=producer_hint,
+                        deterministic_candidate=deterministic_candidate,
+                        model=ai_model,
+                    )
+                    page_offers = merge_ai_product_result(page_offers, ai_result, fetched.final_url)
+                except Exception as exc:
+                    if page_offers:
+                        failures.append({
+                            "url": url,
+                            "error": f"AI assist failed; deterministic result retained: {exc}",
+                        })
+                    else:
+                        failures.append({
+                            "url": url,
+                            "error": f"No deterministic product record; AI assist also failed: {exc}",
+                        })
+
             if page_offers:
                 offers.extend(page_offers)
-            else:
+            elif not any(item.get("url") == url for item in failures):
                 failures.append({"url": url, "error": "No dependable product + price record found."})
         except CatalogScanError as exc:
             failures.append({"url": url, "error": str(exc)})

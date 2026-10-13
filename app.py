@@ -47,6 +47,7 @@ from catalog_scraper import (
     finalize_catalog_offer_dicts,
     CATALOG_PARSER_BUILD,
 )
+from ai_catalog_extractor import ai_catalog_available, get_catalog_ai_model
 from vision_intake import (
     extract_wine_from_images,
     build_comp_record,
@@ -85,7 +86,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.3.28</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.0</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -119,7 +120,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.3.28 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.0 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -416,7 +417,7 @@ elif page == "Data Hub (Admin)":
     st.caption(
         "Paste one public winery shop/catalog page for a user-initiated, low-request scan. "
         "The catalog page is used to discover product links; individual product pages are fetched only after you explicitly select them. "
-        "Known commerce providers can use documented product feeds when available; otherwise the catalog page is parsed normally and individual product pages are fetched only after explicit selection. Extracted rows remain subject to human review before staging."
+        "Known commerce providers can use documented product feeds when available; otherwise the catalog page is parsed normally and individual product pages are fetched only after explicit selection. On selected product pages, AI can act as a conservative interpretation fallback when structured/deterministic extraction is incomplete or noisy. Extracted rows remain subject to human review before staging."
     )
     with st.expander("Catalog scan behavior / safeguards"):
         st.markdown(
@@ -426,6 +427,9 @@ elif page == "Data Hub (Admin)":
 - **VinoShipper:** recognized shop URLs can use VinoShipper's documented Product Feed API; this avoids browser automation and can replace many individual product-page requests
 - **Product links:** discovered from already-fetched catalog HTML; they are **not opened automatically**
 - **Selected pages only:** product pages are fetched only after you check them and click **Scan selected product pages**
+- **Modern-site-first extraction:** documented provider feeds and structured product data remain the highest-authority sources; AI is a fallback/enrichment layer, not the default source of truth
+- **AI request behavior:** AI receives only bounded evidence from HTML already downloaded by the scanner and does **not** make an additional request to the winery site
+- **AI evidence:** AI-assisted rows retain field-level evidence/warnings for administrator review; unknown facts should remain blank rather than guessed
 - **Request pacing:** selected pages are fetched sequentially with a short delay; maximum 12 pages per batch
 - **robots.txt:** checked before fetching; the result is cached in-process for 24 hours
 - **Page cache:** repeated scans of the same URL can reuse a 24-hour in-process HTML cache; stale cached pages use ETag/Last-Modified conditional requests when the site provides them
@@ -504,6 +508,40 @@ The goal is minimal request volume and explicit human control rather than site-w
             "no VinoShipper API key is required for this public product-feed route."
         )
     st.caption(f"Catalog parser build: {CATALOG_PARSER_BUILD}")
+
+    ai_ready = ai_catalog_available()
+    ai_mode_label = st.selectbox(
+        "Selected product-page interpretation",
+        [
+            "AI fallback (recommended)",
+            "Deterministic only",
+            "AI on every selected product page (testing)",
+        ],
+        index=0 if ai_ready else 1,
+        key=f"catalog_ai_mode_{catalog_nonce}",
+        help=(
+            "AI fallback keeps provider feeds and strong structured data deterministic, but lets AI interpret "
+            "legacy/noisy or incomplete selected product pages. AI sees only evidence already downloaded by "
+            "the scanner; it does not make an additional request to the winery site."
+        ),
+    )
+    ai_mode = {
+        "AI fallback (recommended)": "auto",
+        "Deterministic only": "off",
+        "AI on every selected product page (testing)": "always",
+    }[ai_mode_label]
+    if not ai_ready and ai_mode != "off":
+        ai_mode = "off"
+    if ai_ready:
+        st.caption(
+            f"AI interpretation available · model: {get_catalog_ai_model()} · "
+            "provider/API and strong structured facts remain higher-authority evidence."
+        )
+    else:
+        st.caption(
+            "AI interpretation is unavailable because OPENAI_API_KEY is not configured. "
+            "Deterministic/provider scanning remains available."
+        )
 
     scan_col, clear_col = st.columns([3, 1])
     with scan_col:
@@ -637,8 +675,16 @@ The goal is minimal request volume and explicit human control rather than site-w
             key=f"catalog_product_scan_btn_{catalog_nonce}",
         ):
             try:
-                with st.spinner(f"Scanning {selected_count} selected product page(s)…"):
-                    new_offers, failures, fetched_count = scan_selected_product_pages(selected_urls)
+                spinner_text = f"Scanning {selected_count} selected product page(s)…"
+                if ai_mode != "off":
+                    spinner_text = f"Scanning and interpreting {selected_count} selected product page(s)…"
+                with st.spinner(spinner_text):
+                    new_offers, failures, fetched_count = scan_selected_product_pages(
+                        selected_urls,
+                        ai_mode=ai_mode,
+                        producer_hint=catalog_winery.strip(),
+                        ai_model=get_catalog_ai_model() if ai_ready and ai_mode != "off" else None,
+                    )
 
                 # Keep catalog-level candidates separate from explicitly fetched
                 # product pages. Once follow-up is used, the review table should
@@ -676,9 +722,12 @@ The goal is minimal request volume and explicit human control rather than site-w
                 selected_payload = [o.to_dict() for o in combined]
                 st.session_state["catalog_selected_offers"] = selected_payload
                 st.session_state["catalog_offers"] = selected_payload
+                ai_used_count = sum("ai" in str(o.extraction_method or "").casefold() for o in new_offers)
+                ai_note = f" AI interpreted {ai_used_count} record(s)." if ai_used_count else ""
                 st.session_state["catalog_product_scan_summary"] = (
                     f"Processed {fetched_count} explicitly selected product page(s). "
                     f"Added/updated {len(new_offers)} dependable product record(s) with price/metadata where visible."
+                    f"{ai_note}"
                 )
                 st.session_state["catalog_product_scan_failures"] = failures
                 st.rerun()
@@ -695,7 +744,7 @@ The goal is minimal request volume and explicit human control rather than site-w
         for col, default in {
             "varietal": "", "graph_category": "", "general_category": "", "region": "", "subregion": "",
             "alcohol_pct": np.nan, "cases_produced": np.nan, "estate": False, "single_vineyard": False,
-            "product_tier": "Core", "availability_status": "",
+            "product_tier": "Core", "availability_status": "", "extraction_method": "",
         }.items():
             if col not in catalog_df.columns:
                 catalog_df[col] = default
@@ -704,13 +753,14 @@ The goal is minimal request volume and explicit human control rather than site-w
             "stage", "wine", "vintage", "regular_price", "sale_price", "club_price",
             "varietal", "graph_category", "general_category", "region", "subregion",
             "alcohol_pct", "cases_produced", "estate", "single_vineyard", "product_tier",
-            "availability_status", "product_url", "confidence",
+            "availability_status", "extraction_method", "product_url", "confidence",
         ]
         catalog_editable = st.data_editor(
             catalog_df[review_cols],
             hide_index=True,
             use_container_width=True,
             num_rows="dynamic",
+            disabled=["extraction_method", "product_url"],
             column_config={
                 "stage": st.column_config.CheckboxColumn("Stage", help="Add this reviewed row to the normal pending comp batch."),
                 "wine": st.column_config.TextColumn("Wine / product"),
@@ -722,6 +772,7 @@ The goal is minimal request volume and explicit human control rather than site-w
                 "cases_produced": st.column_config.NumberColumn("Cases", format="%d"),
                 "estate": st.column_config.CheckboxColumn("Estate"),
                 "single_vineyard": st.column_config.CheckboxColumn("Single vineyard"),
+                "extraction_method": st.column_config.TextColumn("Extraction"),
                 "product_url": st.column_config.LinkColumn("Product URL"),
             },
             key=f"catalog_editor_{catalog_nonce}",
@@ -730,6 +781,20 @@ The goal is minimal request volume and explicit human control rather than site-w
             "Review/edit these fields before staging. Product pages can contain member-only products, promotions, alternate bottle sizes, "
             "or ambiguous marketing language; human approval remains required."
         )
+        ai_rows = [
+            row for row in catalog_offers_data
+            if "ai" in str((row or {}).get("extraction_method") or "").casefold()
+        ]
+        if ai_rows:
+            with st.expander(f"AI extraction evidence ({len(ai_rows)} record{'s' if len(ai_rows) != 1 else ''})"):
+                st.caption(
+                    "AI is an interpretation layer, not a source of new facts. Evidence below comes from the already-fetched product page. "
+                    "Unknown or unsupported fields should remain blank and every row still requires human review."
+                )
+                for row in ai_rows:
+                    st.markdown(f"**{row.get('vintage', '')} {row.get('wine', '')}** · {row.get('extraction_method', '')}")
+                    if row.get("evidence"):
+                        st.write(str(row.get("evidence")))
 
         selected_catalog_rows = catalog_editable.loc[catalog_editable["stage"].fillna(False)].copy()
         cstage1, cstage2 = st.columns([2, 1])
@@ -1284,7 +1349,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.3.28 approach
+### v0.4.0 approach
 
 The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
@@ -1304,6 +1369,6 @@ The model is a market-positioning aid, not a guarantee of demand or sell-through
 
 **Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by an administrator. The AI extracts visible facts only; deterministic classification rules are applied afterward; a human must review/edit the proposed row before it is added to the session comp database.
 
-**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
+**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. v0.4.0 adds an AI interpretation fallback for selected product pages: strong provider/structured facts remain authoritative, while AI can interpret already-downloaded legacy/noisy HTML and must return field-level evidence. AI does not make an additional winery-site request. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
         """
     )

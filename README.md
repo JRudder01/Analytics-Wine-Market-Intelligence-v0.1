@@ -1,21 +1,45 @@
-# Wine Market Intelligence v0.3.28 — Modern-first parsing
+# Wine Market Intelligence v0.4.0 — AI-Assisted Catalog Collector
 
-This patch makes catalog/product-page extraction prefer modern structured product evidence and become more conservative on legacy storefronts.
+This build changes the catalog collector from a progressively larger HTML-rule parser into a **modern-site-first deterministic collector with a conservative AI interpretation fallback**.
 
-## What changed
+## What changes
 
-- Provider/documented feeds remain highest priority.
-- JSON-LD / structured Product + Offer data now outranks visible legacy HTML heuristics.
-- Selected product pages try to isolate the local product component before using broader page text.
-- Navigation/header/footer text cannot override an explicit product title/varietal (for example, a `WHITE & ROSÉ WINES` menu no longer turns red wines into Rosé).
-- Quantity-tier prices such as `1–11 $49 / 12+ $44.10` are no longer treated as sale prices.
-- Club/member price is populated only when a numeric price is explicitly labeled as club/member pricing.
-- Explicit product-local Estate evidence is honored.
-- `G-S-M` / `GSM` titles normalize to Grenache, Syrah, Mourvèdre and Rhône Blend.
-- Unstructured/legacy selected-page extraction is deliberately capped at Moderate confidence; structured modern records can remain High.
+The source hierarchy is now:
 
-## Regression coverage
+1. documented provider feed/API when available
+2. structured product data / JSON-LD
+3. focused product-component extraction
+4. AI-assisted interpretation for legacy, noisy, incomplete, or otherwise ambiguous selected product pages
+5. deterministic fallback / human review
 
-39 catalog tests pass, including A&D, VinoShipper/915 Lincoln, Eberle, modern JSON-LD precedence, J. Rickards-style navigation contamination, quantity pricing, club-price labeling, Estate evidence, GSM, and complex Bordeaux blends.
+AI is deliberately **not** the authority when the site already supplies reliable structured facts.
 
-No requirements, secrets, database, or GitHub permission changes are required.
+## AI request behavior
+
+- AI runs only on product pages the administrator explicitly selects.
+- In the default **AI fallback** mode, complete High-confidence JSON-LD records skip AI.
+- AI receives bounded text/structured evidence from HTML the scanner has already downloaded. It does not make another request to the winery site.
+- Every AI result uses a strict structured schema.
+- Non-null facts are expected to include field-level supporting evidence.
+- Deterministic sanity checks reject implausible vintages, ABV, prices, cases, and unsupported fields.
+- Unknown facts are supposed to remain blank rather than be guessed.
+- Human review remains required before staging and GitHub commit.
+
+## Pricing safeguards
+
+The AI instructions explicitly distinguish:
+
+- ordinary public bottle price
+- genuine sale/promotion price
+- explicit numeric club/member price
+- quantity/case discounts such as 12+ bottle pricing
+
+Quantity discounts are not stored as sale or club prices.
+
+## Modern sites stay preferred
+
+Provider feeds and strong structured data retain higher authority than AI. If a modern JSON-LD product has a dependable name/price, AI cannot silently replace those facts during enrichment.
+
+## Current limitation
+
+This build interprets **HTML already available to the low-request collector**. It does not execute JavaScript or operate a browser. A site that exposes no useful product evidence until client-side JavaScript runs can still require the existing screenshot workflow or a future explicitly controlled browser-agent layer.

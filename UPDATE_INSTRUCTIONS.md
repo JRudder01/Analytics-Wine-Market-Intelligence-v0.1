@@ -1,22 +1,32 @@
-# v0.3.28 update instructions
+# v0.4.0 update instructions
 
-Replace these files in the repository root:
+Starting from the current v0.3.28 repository:
 
-1. `app.py`
-2. `catalog_scraper.py`
+1. Replace root `app.py`.
+2. Replace root `catalog_scraper.py`.
+3. Add new root file `ai_catalog_extractor.py`.
+4. Recommended: replace `tests/test_catalog_enrichment.py` and add `tests/test_ai_catalog_extractor.py`.
 
-Recommended for the repository test suite:
+No database migration is required.
 
-3. `tests/test_catalog_enrichment.py`
+No new Python dependency is required beyond the existing app requirements; the build uses the same installed OpenAI SDK and `OPENAI_API_KEY` already used by Screenshot Intake.
 
-Then let Streamlit redeploy (reboot once if needed) and confirm both UI indicators show `v0.3.28`.
+Optional configuration:
 
-For the J. Rickards regression test, clear the prior scan, rescan the All Wines catalog, and re-open the same five selected product pages. Expected behavior includes:
+- `OPENAI_CATALOG_MODEL` may be added to Streamlit Secrets/environment to use a catalog-specific model.
+- If it is not set, the collector uses the same default model configured for the existing AI intake workflow.
 
-- Five Sisters Cabernet Sauvignon → Cabernet Sauvignon / Red; Estate=True; $49 regular; no sale/club price inferred from quantity/club boilerplate.
-- G-S-M Red Blend → Rhône Blend / Red; quantity price is not a sale.
-- Left Bank Cuvée → Bordeaux Blend / Red; quantity price is not a sale.
-- Reserve Old Vine Zinfandel → Zinfandel / Red / Reserve.
-- Twilight Late Harvest Viognier → Viognier / White.
+After deployment, verify both the app header and `Catalog parser build` show `v0.4.0`.
 
-Legacy/unstructured rows may show Moderate confidence by design.
+## First recommended test
+
+Re-run the same five J. Rickards product pages that exposed the legacy-page issues. Leave **Selected product-page interpretation** on `AI fallback (recommended)`.
+
+Expected behavior:
+
+- legacy/noisy J. Rickards pages should show an AI-assisted extraction method;
+- the 12+ quantity price should not populate `sale_price`;
+- generic club messaging should not create a numeric `club_price`;
+- the page-wide `WHITE & ROSÉ WINES` navigation should not classify red wines as Rosé;
+- an `AI extraction evidence` expander should appear under the review table;
+- every result still remains editable and requires normal staging/commit approval.
