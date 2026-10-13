@@ -720,3 +720,113 @@ def test_single_varietal_drops_100_percent_and_estate_qualifier():
     assert _normalize_varietal_aliases("56% Grenache, 38% Syrah, 6% Mourvèdre") == (
         "56% Grenache, 38% Syrah, 6% Mourvèdre"
     )
+
+
+def test_modern_jsonld_identity_beats_conflicting_navigation_text():
+    html = '''
+    <html><body>
+      <nav>ALL WINES WHITE & ROSÉ WINES RED WINES</nav>
+      <main>
+        <h1>2023 Cabernet Sauvignon</h1>
+        <script type="application/ld+json">{
+          "@context":"https://schema.org", "@type":"Product",
+          "name":"2023 Cabernet Sauvignon",
+          "description":"Cabernet Sauvignon from Paso Robles.",
+          "offers":{"@type":"Offer","price":"55.00","priceCurrency":"USD"}
+        }</script>
+        <div>$55.00</div>
+      </main>
+    </body></html>
+    '''
+    o = _extract_product_page_offers(html, "https://example.com/products/cabernet")[0]
+    assert o.graph_category == "Cabernet Sauvignon"
+    assert o.general_category == "Red"
+    assert o.regular_price == 55.0
+    assert o.confidence == "High"
+
+
+def test_legacy_navigation_cannot_turn_gsm_into_rose_and_quantity_tier_is_not_sale():
+    html = '''
+    <html><body>
+      <div class="site-menu">ALL WINES WHITE & ROSÉ WINES RED WINES</div>
+      <div class="product-detail">
+        <h1>2022 G-S-M Red Blend</h1>
+        <div>Price: $40.00</div>
+        <div>Description</div>
+        <p>Grenache, Syrah, and Mourvèdre create this classic Rhône-style red blend.</p>
+        <div>Price Details Qty Unit Price 1 - 11 $40.00 12 + $36.00</div>
+      </div>
+      <footer>Club Members save even more.</footer>
+    </body></html>
+    '''
+    o = _extract_product_page_offers(html, "https://legacy.example.com/2022-g-s-m-red-blend-p311.aspx")[0]
+    assert o.graph_category == "Rhône Blend"
+    assert o.general_category == "Red"
+    assert o.varietal == "Grenache, Syrah, Mourvèdre"
+    assert o.regular_price == 40.0
+    assert o.sale_price is None
+    assert o.club_price is None
+    assert o.confidence == "Moderate"
+
+
+def test_quantity_discount_is_not_sale_but_explicit_sale_still_is():
+    from catalog_scraper import _classify_prices
+    regular, sale, club = _classify_prices("Price: $49.00 Qty Unit Price 1 - 11 $49.00 12 + $44.10")
+    assert regular == 49.0
+    assert sale is None
+    assert club is None
+
+    regular, sale, club = _classify_prices("Regular Price: $60.00 Sale Price: $48.00")
+    assert regular == 60.0
+    assert sale == 48.0
+    assert club is None
+
+
+def test_generic_club_message_does_not_create_club_price_but_explicit_club_price_does():
+    from catalog_scraper import _classify_prices
+    regular, sale, club = _classify_prices("Club member? Log in for exclusive pricing and offers. Price: $49.00")
+    assert regular == 49.0
+    assert sale is None
+    assert club is None
+
+    regular, sale, club = _classify_prices("Retail Price: $49.00 Club Price: $39.20")
+    assert regular == 49.0
+    assert club == 39.2
+
+
+def test_five_sisters_product_local_estate_and_cabernet_identity():
+    html = '''
+    <html><body>
+      <div>WHITE & ROSÉ WINES</div>
+      <div class="product-detail">
+        <h1>2023 Five Sisters Cabernet Sauvignon</h1>
+        <div>Price: $49.00</div>
+        <p>Grapes for our Estate Five Sisters Blend Cabernet Sauvignon were cool fermented.
+        The wine is a blend of 85% Cabernet Sauvignon, 7% Malbec, 5% Merlot,
+        2% Cabernet Franc, and 1% Petit Verdot.</p>
+        <div>Price Details Qty Unit Price 1 - 11 $49.00 12 + $44.10</div>
+      </div>
+    </body></html>
+    '''
+    o = _extract_product_page_offers(html, "https://legacy.example.com/five-sisters.aspx")[0]
+    assert o.graph_category == "Cabernet Sauvignon"
+    assert o.general_category == "Red"
+    assert o.estate is True
+    assert o.sale_price is None
+    assert o.club_price is None
+
+
+def test_left_bank_complex_bordeaux_composition_remains_bordeaux_blend():
+    html = '''
+    <html><body><div class="product-detail">
+      <h1>2023 Left Bank Cuvée</h1>
+      <div>Price: $43.00</div>
+      <p>31% Cabernet Sauvignon, 26% Petit Verdot, 24% Malbec, 11% Merlot, 8% Cabernet Franc.</p>
+      <div>Price Details 1 - 11 $43.00 12 + $38.70</div>
+    </div></body></html>
+    '''
+    o = _extract_product_page_offers(html, "https://legacy.example.com/left-bank.aspx")[0]
+    assert o.graph_category == "Bordeaux Blend"
+    assert o.general_category == "Red"
+    assert o.sale_price is None
+    assert "31% Cabernet Sauvignon" in o.varietal

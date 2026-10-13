@@ -20,7 +20,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
-CATALOG_PARSER_BUILD = "v0.3.27"
+CATALOG_PARSER_BUILD = "v0.3.28"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
@@ -1467,7 +1467,32 @@ def _coerce_price(value: Any) -> float | None:
     return round(price, 2)
 
 
+def _explicit_price_role(label_text: str) -> str:
+    """Classify a price only from an explicit, local price label.
+
+    Modern structured data and clearly labeled product components get priority.
+    Generic mentions such as "club members save" do not turn an unrelated retail
+    price into a club price.
+    """
+    text = re.sub(r"\s+", " ", str(label_text or "")).strip().casefold()
+    if re.search(r"\b(?:club|member|membership|wine society)\s*(?:price|pricing|rate)?\b", text):
+        # Require a price-oriented label, except for very short labels like "Club".
+        if re.search(r"\b(?:price|pricing|rate)\b", text) or len(text.split()) <= 3:
+            return "club"
+    if re.search(r"\b(?:sale|clearance|promo(?:tion)?|special)\s*(?:price|pricing|rate)?\b", text):
+        return "sale"
+    if re.search(r"\b(?:retail|msrp|regular|list)\s*(?:price|pricing|rate)?\b", text):
+        return "regular"
+    return ""
+
+
 def _offer_prices(offers: Any) -> tuple[float | None, float | None, float | None, str]:
+    """Read structured Product/Offer pricing conservatively.
+
+    A documented/structured offer is more authoritative than visible legacy page
+    heuristics.  We therefore only assign sale/club roles when the structured
+    offer explicitly labels that role.
+    """
     regular = sale = club = None
     currency = "USD"
     candidates = offers if isinstance(offers, list) else [offers]
@@ -1478,12 +1503,19 @@ def _offer_prices(offers: Any) -> tuple[float | None, float | None, float | None
         price = _coerce_price(offer.get("price") or offer.get("lowPrice"))
         if price is None:
             continue
-        label = " ".join(
-            str(offer.get(k) or "") for k in ("name", "description", "category", "priceSpecification")
-        ).casefold()
-        if any(word in label for word in ("club", "member", "society")):
+        pieces: list[str] = []
+        for k in ("name", "description", "category"):
+            if offer.get(k) not in (None, ""):
+                pieces.append(str(offer.get(k)))
+        spec = offer.get("priceSpecification")
+        if isinstance(spec, dict):
+            pieces.extend(str(spec.get(k) or "") for k in ("name", "description", "priceType") if spec.get(k))
+        elif spec not in (None, ""):
+            pieces.append(str(spec))
+        role = _explicit_price_role(" ".join(pieces))
+        if role == "club":
             club = price if club is None else min(club, price)
-        elif any(word in label for word in ("sale", "discount", "clearance")):
+        elif role == "sale":
             sale = price if sale is None else min(sale, price)
         elif regular is None:
             regular = price
@@ -1528,32 +1560,84 @@ def _extract_jsonld(soup: BeautifulSoup, base_url: str) -> list[WineOffer]:
     return offers
 
 
+def _quantity_tier_min_qty(text: str, price_start: int) -> int | None:
+    """Return the minimum quantity tied to a nearby price, when explicit.
+
+    Examples: ``1 - 11 $49`` -> 1, ``12 + $44.10`` -> 12.  The nearest
+    quantity expression wins so a prior tier cannot bleed into the next price.
+    """
+    prefix = str(text or "")[max(0, price_start - 90):price_start]
+    matches: list[tuple[int, int]] = []
+    patterns = [
+        r"\b(\d{1,3})\s*[-–]\s*\d{1,3}\s*$",
+        r"\b(\d{1,3})\s*\+\s*$",
+        r"\b(\d{1,3})\s*(?:or more|and up|or greater)\s*$",
+        r"\b(?:case of|case|qty|quantity)\s*(\d{1,3})\s*$",
+        r"\b(\d{1,3})\s*(?:bottles?|units?)\s*$",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, prefix, re.I)
+        if m:
+            matches.append((m.start(), int(m.group(1))))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item[0])[1]
+
+
+def _explicit_role_near_price(text: str, match: re.Match[str]) -> str:
+    label = (match.group(1) or "").strip()
+    if label:
+        role = _explicit_price_role(label)
+        if role:
+            return role
+    prefix = str(text or "")[max(0, match.start() - 55):match.start()]
+    local = re.split(r"[.!?;|]\s*", prefix)[-1]
+    # Keep this intentionally strict. A page-wide "club members save" message is
+    # not enough; the price itself must be labeled as club/member pricing.
+    if re.search(r"\b(?:club|member|membership|wine society)\s+(?:price|pricing|rate)\s*[:\-]?\s*$", local, re.I):
+        return "club"
+    if re.search(r"\b(?:sale|clearance|promo(?:tion)?|special)\s+(?:price|pricing|rate)?\s*[:\-]?\s*$", local, re.I):
+        return "sale"
+    if re.search(r"\b(?:retail|msrp|regular|list)\s+(?:price|pricing|rate)?\s*[:\-]?\s*$", local, re.I):
+        return "regular"
+    return ""
+
+
 def _classify_prices(text: str) -> tuple[float | None, float | None, float | None]:
+    """Classify visible prices without mistaking quantity tiers for sales.
+
+    This is the legacy/HTML fallback. Modern structured prices are handled by
+    ``_offer_prices`` first and therefore outrank these heuristics.
+    """
     regular = sale = club = None
-    matches = list(PRICE_RE.finditer(text))
+    matches = list(PRICE_RE.finditer(str(text or "")))
     for match in matches:
-        label = (match.group(1) or "").casefold()
-        # Product pages often put words such as "member pricing" several words
-        # before the dollar value. Read a small amount of surrounding text so
-        # that price type is not determined only by the token immediately
-        # adjacent to the price.
-        prefix = text[max(0, match.start() - 90):match.start()].casefold()
-        # Only carry price-type words from the current sentence/clause so a
-        # member-price sentence does not accidentally label the next visible
-        # retail price as a member price too.
-        local_prefix = re.split(r"[.!?;]\s*", prefix)[-1]
-        context = f"{label} {local_prefix}"
         price = _coerce_price(match.group(2))
         if price is None:
             continue
-        if any(word in context for word in ("club", "member", "membership", "wine society", "preferred pricing")):
+
+        min_qty = _quantity_tier_min_qty(text, match.start())
+        # A 12+/case/etc. price is a quantity tier, not a sale.  A 1-11 tier is
+        # the ordinary single-bottle price and remains eligible as regular.
+        if min_qty is not None and min_qty > 1:
+            continue
+
+        role = _explicit_role_near_price(text, match)
+        if role == "club":
             club = price if club is None else min(club, price)
-        elif any(word in context for word in ("sale", "discount", "clearance", "special price", "promotion")):
+            continue
+        if role == "sale":
             sale = price if sale is None else min(sale, price)
-        elif regular is None:
+            continue
+        if role == "regular":
+            regular = price if regular is None else max(regular, price)
+            continue
+
+        if regular is None:
             regular = price
         elif price < regular and sale is None:
-            # Multiple unlabeled prices often means current/sale + struck list price.
+            # Preserve conventional old-markup behavior such as <s>$60</s> $48,
+            # but only after quantity-tier prices have already been excluded.
             sale = price
         elif price > regular:
             regular, sale = price, regular if sale is None else sale
@@ -2192,38 +2276,67 @@ def _extract_varietal(title: str, text: str) -> str:
 
 
 def _infer_graph_category(varietal: str, title: str, text: str) -> str:
-    blob = f"{varietal} {title} {text[:1200]}".casefold()
-    if any(k in blob for k in ["rosé", "rose"]):
+    """Infer market category with product identity outranking page prose.
+
+    A title/structured varietal must never be overridden by global navigation such
+    as "WHITE & ROSÉ WINES". Broader prose is used only as a last fallback.
+    """
+    varietal = _normalize_varietal_aliases(varietal)
+    title_text = _clean_name(title)
+    identity_blob = f"{varietal} {title_text}".casefold()
+    title_key = _ascii_key(title_text)
+
+    if re.search(r"\b(?:ros[eé]|rosato)\b", identity_blob, re.I):
         return "Rosé"
-    if any(k in blob for k in ["sparkling", "brut", "méthode traditionnelle", "methode traditionnelle"]):
+    if re.search(r"\b(?:sparkling|brut|prosecco|cava)\b", identity_blob, re.I):
         return "Sparkling"
-    bordeaux = ["cabernet sauvignon", "cabernet franc", "merlot", "malbec", "petit verdot"]
-    rhone_red = ["grenache", "syrah", "mourv", "counoise"]
-    rhone_white = ["grenache blanc", "roussanne", "marsanne", "picpoul", "viognier", "clairette"]
-    if sum(term in varietal.casefold() for term in bordeaux) >= 2:
-        return "Bordeaux Blend"
-    if sum(term in varietal.casefold() for term in rhone_white) >= 2:
-        return "White Blend"
-    if sum(term in varietal.casefold() for term in rhone_red) >= 2:
+    if re.search(r"\bg\s*[- ]?\s*s\s*[- ]?\s*m\b", title_text, re.I):
         return "Rhône Blend"
-    # Product names frequently carry style information even when the provider's
-    # single-varietal field is blank or overly broad.
-    title_key = _ascii_key(title)
-    if any(term in title_key for term in ["le rhone", "rhone blend", "rhone red", "rhone"]):
+    if any(term in title_key for term in ["le rhone", "rhone blend", "rhone red"]):
         return "Rhône Blend"
-    if "white blend" in blob or "blanc" in title.casefold():
-        return "White Blend"
-    if "red blend" in blob or "proprietary red" in blob or ("blend" in title.casefold() and _infer_general_category("", varietal, title) == "Red"):
-        return "Red Blend"
+
     singles = [
         "Cabernet Sauvignon", "Cabernet Franc", "Chardonnay", "Pinot Noir", "Merlot",
         "Sauvignon Blanc", "Syrah", "Grenache", "Zinfandel", "Petite Sirah", "Viognier",
         "Riesling", "Barbera", "Sangiovese", "Tempranillo", "Vermentino", "Muscat Canelli",
         "Malbec", "Petit Verdot", "Tannat", "Grenache Blanc", "Albariño", "Albarino",
     ]
+    # Explicit single-varietal product names get strong authority. This also
+    # handles legal varietal wines that disclose small blending components.
+    for grape in sorted(singles, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(grape)}\b", title_text, re.I):
+            return "Albariño" if grape == "Albarino" else grape
+
+    vcf = varietal.casefold()
+    bordeaux = ["cabernet sauvignon", "cabernet franc", "merlot", "malbec", "petit verdot"]
+    rhone_red = ["grenache", "syrah", "mourv", "counoise"]
+    rhone_white = ["grenache blanc", "roussanne", "marsanne", "picpoul", "viognier", "clairette"]
+    if sum(term in vcf for term in bordeaux) >= 2:
+        return "Bordeaux Blend"
+    if sum(term in vcf for term in rhone_white) >= 2:
+        return "White Blend"
+    if sum(term in vcf for term in rhone_red) >= 2:
+        return "Rhône Blend"
+
+    if "white blend" in identity_blob or "blanc" in title_text.casefold():
+        return "White Blend"
+    if "red blend" in identity_blob or "proprietary red" in identity_blob or "cuvée" in title_text.casefold() or "cuvee" in title_text.casefold():
+        return "Red Blend"
     for grape in singles:
-        if grape.casefold() in blob:
-            return grape
+        if grape.casefold() in identity_blob:
+            return "Albariño" if grape == "Albarino" else grape
+
+    # Last-resort local product prose only. The caller scopes ``text`` to the
+    # product component when possible, so this does not normally include menus.
+    local = str(text or "")[:1600].casefold()
+    if re.search(r"\b(?:ros[eé]|rosato)\b", local, re.I):
+        return "Rosé"
+    if re.search(r"\b(?:sparkling|brut|méthode traditionnelle|methode traditionnelle)\b", local, re.I):
+        return "Sparkling"
+    if "white blend" in local:
+        return "White Blend"
+    if "red blend" in local or "proprietary red" in local:
+        return "Red Blend"
     return "Other"
 
 
@@ -2325,19 +2438,122 @@ def _infer_single_vineyard(title: str, text: str) -> bool:
     )
 
 
+def _clean_product_node_text(node: Tag | BeautifulSoup) -> str:
+    """Return text from one product scope with obvious page-shell content removed."""
+    clone = BeautifulSoup(str(node), "html.parser")
+    for tag in clone.find_all(["script", "style", "noscript", "svg", "nav", "header", "footer"]):
+        tag.decompose()
+    for tag in list(clone.find_all(True)):
+        role = str(tag.get("role") or "").casefold()
+        marker = " ".join([
+            str(tag.get("id") or ""),
+            " ".join(str(x) for x in (tag.get("class") or [])),
+        ]).casefold()
+        if role in {"navigation", "banner", "contentinfo"}:
+            tag.decompose()
+            continue
+        if re.search(r"(?:^|[\s_-])(?:breadcrumb|site[-_ ]?nav|main[-_ ]?nav|mega[-_ ]?menu|site[-_ ]?header|site[-_ ]?footer|related[-_ ]?products?|recommend(?:ed|ations))(?:$|[\s_-])", marker):
+            tag.decompose()
+    return re.sub(r"\s+", " ", clone.get_text(" ", strip=True)).strip()
+
+
+def _product_local_text(soup: BeautifulSoup, title: str) -> tuple[str, str]:
+    """Prefer the smallest credible product component over whole-page text.
+
+    Returns ``(text, authority)`` where authority is ``product-container`` or
+    ``page-fallback``. Provider feeds/JSON-LD remain a still-higher authority.
+    """
+    candidates: list[tuple[float, str]] = []
+    heading = soup.find("h1")
+
+    explicit_nodes: list[Tag] = []
+    for tag in soup.find_all(True):
+        itemtype = str(tag.get("itemtype") or "").casefold()
+        marker = " ".join([
+            str(tag.get("id") or ""),
+            " ".join(str(x) for x in (tag.get("class") or [])),
+        ]).casefold()
+        if "schema.org/product" in itemtype or re.search(r"(?:^|[\s_-])product(?:[-_ ]?(?:detail|details|info|main|page|summary|content|view))?(?:$|[\s_-])", marker):
+            explicit_nodes.append(tag)
+        elif any(tag.has_attr(attr) for attr in ("data-product-id", "data-product-handle", "data-product")):
+            explicit_nodes.append(tag)
+
+    ancestor_nodes: list[Tag] = []
+    node = heading.parent if isinstance(heading, Tag) and isinstance(heading.parent, Tag) else None
+    for _ in range(7):
+        if not isinstance(node, Tag):
+            break
+        ancestor_nodes.append(node)
+        node = node.parent if isinstance(node.parent, Tag) else None
+
+    for node in [*explicit_nodes, *ancestor_nodes, *[x for x in (soup.find("main"), soup.find("article")) if isinstance(x, Tag)]]:
+        text = _clean_product_node_text(node)
+        if not text or len(text) > 18000:
+            continue
+        has_price = bool(PRICE_RE.search(text))
+        title_key = _ascii_key(title)
+        contains_title = bool(title_key and title_key[:50] in _ascii_key(text))
+        technical = bool(re.search(r"\b(?:varietal|composition|appellation|alcohol|abv|cases?|description|price details)\b", text, re.I))
+        if not has_price or not contains_title:
+            continue
+        # Favor focused product blocks while still rewarding technical detail.
+        score = 140 + (35 if technical else 0) - min(len(text), 15000) / 600
+        if node in explicit_nodes:
+            score += 30
+        candidates.append((score, text))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1], "product-container"
+
+    # Conservative fallback: remove semantic page shell, but keep body components
+    # because some modern stores render important accordion/spec content outside
+    # the immediate title container.
+    return _clean_product_node_text(soup), "page-fallback"
+
+
+def _merge_metadata(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    """Merge metadata with structured/description evidence taking precedence."""
+    out: dict[str, Any] = {}
+    for field in ("varietal", "graph_category", "region", "subregion", "availability_status"):
+        p = primary.get(field)
+        f = fallback.get(field)
+        if field == "graph_category":
+            out[field] = p if p and p != "Other" else f
+        else:
+            out[field] = p if p not in (None, "") else f
+    for field in ("alcohol_pct", "cases_produced"):
+        out[field] = primary.get(field) if primary.get(field) is not None else fallback.get(field)
+    out["estate"] = bool(primary.get("estate") or fallback.get("estate"))
+    # Affirmative structured/local evidence can establish single-vineyard status;
+    # otherwise default false rather than inventing it.
+    out["single_vineyard"] = bool(primary.get("single_vineyard") or fallback.get("single_vineyard"))
+    pt = primary.get("product_tier")
+    ft = fallback.get("product_tier")
+    out["product_tier"] = pt if pt and pt != "Core" else (ft or pt or "Core")
+    out["general_category"] = _infer_general_category(out.get("graph_category") or "", out.get("varietal") or "", "")
+    out["_geography_conflict"] = bool(primary.get("_geography_conflict") or fallback.get("_geography_conflict"))
+    return out
+
+
 def _extract_product_metadata(title: str, page_text: str) -> dict[str, Any]:
     varietal = _extract_varietal(title, page_text)
+    # G-S-M/GSM in a product title is an explicit Rhône identity even when the
+    # legacy page omits a technical composition table.
+    if not varietal and re.search(r"\bg\s*[- ]?\s*s\s*[- ]?\s*m\b", title, re.I):
+        varietal = "Grenache, Syrah, Mourvèdre"
     graph = _infer_graph_category(varietal, title, page_text)
     general = _infer_general_category(graph, varietal, title)
     region, subregion, geography_conflict = _extract_region(page_text)
     alcohol = _extract_abv(page_text)
     cases = _extract_cases(page_text)
-    blob = f"{title} {page_text[:2500]}".casefold()
     estate = bool(
         re.search(r"\bestate\b", title, re.I)
         or re.search(r"\b(?:100%\s+)?estate[- ]grown\b", page_text, re.I)
         or re.search(r"\bestate[- ]bottled\b", page_text, re.I)
         or re.search(r"\b(?:crafted|made|produced) from[^.]{0,100}\bestate\b", page_text, re.I)
+        # Product-local phrasing such as "our Estate Five Sisters Blend".
+        or re.search(r"\bestate\s+(?:[A-Za-zÀ-ÿ0-9'’\-]+\s+){0,5}(?:blend|wine|cabernet(?: sauvignon)?|chardonnay|syrah|zinfandel|merlot|pinot(?: noir)?|sauvignon blanc|viognier|malbec|grenache)\b", page_text, re.I)
     )
     single = _infer_single_vineyard(title, page_text)
     tier = _infer_tier(title, page_text, estate, cases)
@@ -2356,8 +2572,14 @@ def _extract_product_metadata(title: str, page_text: str) -> dict[str, Any]:
         "_geography_conflict": geography_conflict,
     }
 
+
 def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
-    """Extract price plus conservative product metadata from one selected page."""
+    """Extract one selected product page using a modern-site-first hierarchy.
+
+    Authority order: structured Product data -> scoped product component ->
+    conservative whole-page fallback. Legacy heuristics never override stronger
+    structured identity/pricing.
+    """
     soup = BeautifulSoup(html, "html.parser")
 
     title = ""
@@ -2371,24 +2593,22 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
     if not title and soup.title:
         title = _clean_name(soup.title.get_text(" ", strip=True))
 
-    # Build visible text once, excluding script/style noise.
-    soup_for_text = BeautifulSoup(html, "html.parser")
-    for tag in soup_for_text(["script", "style", "noscript", "svg"]):
-        tag.decompose()
-    page_text = re.sub(r"\s+", " ", soup_for_text.get_text(" ", strip=True))
-    metadata = _extract_product_metadata(title, page_text)
-    geography_conflict = bool(metadata.pop("_geography_conflict", False))
-
+    product_text, text_authority = _product_local_text(soup, title)
     structured = _extract_jsonld(soup, base_url)
+
     if structured:
         for offer in structured:
+            effective_title = title or offer.wine
+            structured_meta = _extract_product_metadata(effective_title, offer.evidence if offer.evidence != "JSON-LD Product" else "")
+            local_meta = _extract_product_metadata(effective_title, product_text)
+            metadata = _merge_metadata(structured_meta, local_meta)
+            geography_conflict = bool(metadata.pop("_geography_conflict", False))
             if not offer.vintage:
-                offer.vintage = _vintage_from_name(offer.wine) or _vintage_from_name(page_text[:900])
+                offer.vintage = _vintage_from_name(offer.wine) or _vintage_from_name(product_text[:900])
             for field, value in metadata.items():
                 setattr(offer, field, value)
             if geography_conflict and offer.confidence == "High":
                 offer.confidence = "Moderate"
-            # Prefer the visible h1/OG title when JSON-LD is generic.
             if title and (_ascii_key(offer.wine) in {"wine", "product", "shop"} or len(offer.wine) < 4):
                 offer.wine = title
             offer.wine = _canonical_wine_name(offer.wine, offer.vintage)
@@ -2397,20 +2617,25 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
     if not title:
         return []
 
-    regular, sale, club = _classify_prices(page_text)
+    metadata = _extract_product_metadata(title, product_text)
+    geography_conflict = bool(metadata.pop("_geography_conflict", False))
+    regular, sale, club = _classify_prices(product_text)
     if regular is None and sale is None and club is None:
         return []
 
-    price_match = PRICE_RE.search(page_text)
+    price_match = PRICE_RE.search(product_text)
     if price_match:
-        start = max(0, price_match.start() - 180)
-        end = min(len(page_text), price_match.end() + 320)
-        evidence = page_text[start:end]
+        start = max(0, price_match.start() - 140)
+        end = min(len(product_text), price_match.end() + 900)
+        evidence = product_text[start:end]
     else:
-        evidence = page_text[:500]
+        evidence = product_text[:900]
 
-    extracted_vintage = _vintage_from_name(title) or _vintage_from_name(page_text[:900])
+    extracted_vintage = _vintage_from_name(title) or _vintage_from_name(product_text[:900])
     canonical_title = _canonical_wine_name(title, extracted_vintage)
+    # Unstructured HTML is intentionally conservative. Modern sites with JSON-LD
+    # retain High confidence; legacy/local heuristics begin at Moderate.
+    confidence = "Moderate"
     return finalize_catalog_offers([
         WineOffer(
             wine=canonical_title,
@@ -2420,12 +2645,13 @@ def _extract_product_page_offers(html: str, base_url: str) -> list[WineOffer]:
             club_price=club,
             currency="USD",
             product_url=base_url,
-            evidence=evidence[:500],
-            extraction_method="Selected product page",
-            confidence=("Moderate" if geography_conflict else ("High" if regular is not None else "Moderate")),
+            evidence=evidence[:1200],
+            extraction_method=("Selected product component" if text_authority == "product-container" else "Selected product page fallback"),
+            confidence=confidence,
             **metadata,
         )
     ])
+
 
 def merge_offers(offers: list[WineOffer]) -> list[WineOffer]:
     return _dedupe(offers)

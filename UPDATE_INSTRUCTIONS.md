@@ -1,14 +1,22 @@
-# v0.3.27 update instructions
+# v0.3.28 update instructions
 
 Replace these files in the repository root:
 
-- `app.py`
-- `catalog_scraper.py`
+1. `app.py`
+2. `catalog_scraper.py`
 
-Recommended for the repo test suite:
+Recommended for the repository test suite:
 
-- `tests/test_catalog_enrichment.py`
+3. `tests/test_catalog_enrichment.py`
 
-No changes are required to requirements, Streamlit secrets, GitHub permissions, or `data/wine_comps.csv`.
+Then let Streamlit redeploy (reboot once if needed) and confirm both UI indicators show `v0.3.28`.
 
-After Streamlit redeploys, confirm both the app version and `Catalog parser build` show `v0.3.27`. Clear the prior Eberle scan and rerun the same five selected product pages.
+For the J. Rickards regression test, clear the prior scan, rescan the All Wines catalog, and re-open the same five selected product pages. Expected behavior includes:
+
+- Five Sisters Cabernet Sauvignon → Cabernet Sauvignon / Red; Estate=True; $49 regular; no sale/club price inferred from quantity/club boilerplate.
+- G-S-M Red Blend → Rhône Blend / Red; quantity price is not a sale.
+- Left Bank Cuvée → Bordeaux Blend / Red; quantity price is not a sale.
+- Reserve Old Vine Zinfandel → Zinfandel / Red / Reserve.
+- Twilight Late Harvest Viognier → Viognier / White.
+
+Legacy/unstructured rows may show Moderate confidence by design.

@@ -1,20 +1,21 @@
-# Rudder Analytics Wine Market Intelligence v0.3.27
+# Wine Market Intelligence v0.3.28 — Modern-first parsing
 
-Small normalization cleanup following the Eberle regression test.
+This patch makes catalog/product-page extraction prefer modern structured product evidence and become more conservative on legacy storefronts.
 
-## Changes
-- Reserve tier detection now requires the whole word `Reserve`, preventing prose such as `preserve` or `preserves` from creating false Reserve classifications.
-- The universal finalizer repairs stale false-positive Reserve rows before review/staging.
-- Canonical single-varietal values now remove `100%` and `Estate` qualifiers (for example, `100% Estate Cabernet Sauvignon` becomes `Cabernet Sauvignon`).
-- Blend percentages are preserved because they carry useful composition information.
-- App and catalog parser build labels updated to v0.3.27.
+## What changed
 
-## Validation
-- 33/33 catalog enrichment regression tests pass.
-- `app.py` and `catalog_scraper.py` compile successfully.
-- Replayed against the latest five-row Eberle export:
-  - Côtes du Rôbles Rouge -> Core
-  - Estate Cabernet Sauvignon -> Cabernet Sauvignon / Estate
-  - Reserve Chardonnay -> Chardonnay / Reserve
-  - Steinbeck Syrah -> Syrah / Core
-  - Vineyard Selection Cabernet -> Cabernet Sauvignon / Core
+- Provider/documented feeds remain highest priority.
+- JSON-LD / structured Product + Offer data now outranks visible legacy HTML heuristics.
+- Selected product pages try to isolate the local product component before using broader page text.
+- Navigation/header/footer text cannot override an explicit product title/varietal (for example, a `WHITE & ROSÉ WINES` menu no longer turns red wines into Rosé).
+- Quantity-tier prices such as `1–11 $49 / 12+ $44.10` are no longer treated as sale prices.
+- Club/member price is populated only when a numeric price is explicitly labeled as club/member pricing.
+- Explicit product-local Estate evidence is honored.
+- `G-S-M` / `GSM` titles normalize to Grenache, Syrah, Mourvèdre and Rhône Blend.
+- Unstructured/legacy selected-page extraction is deliberately capped at Moderate confidence; structured modern records can remain High.
+
+## Regression coverage
+
+39 catalog tests pass, including A&D, VinoShipper/915 Lincoln, Eberle, modern JSON-LD precedence, J. Rickards-style navigation contamination, quantity pricing, club-price labeling, Estate evidence, GSM, and complex Bordeaux blends.
+
+No requirements, secrets, database, or GitHub permission changes are required.
