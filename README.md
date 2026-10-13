@@ -1,47 +1,28 @@
-# Wine Market Intelligence v0.4.1 — Bottle/Style Safeguards
+# Wine Market Intelligence v0.4.2 — Explicit Rendered-Page Fallback
 
-This is a focused follow-up to the v0.4.0 AI-assisted catalog collector.
+This build adds a deliberately isolated JavaScript-rendering fallback for modern storefronts whose static HTML/JSON-LD contains no dependable wine products.
 
-## What changes
+## What changed
 
-### 1. Bottle size is now a first-class extracted fact
+- Normal/provider/static scanning remains the default and unchanged in priority.
+- When a static catalog scan finds **no product records and no product links**, the UI can show **Render this page once (JavaScript fallback)**.
+- Rendering is **manual only**. It never activates silently.
+- The browser opens only the exact URL supplied by the administrator. It does not click links, log in, solve CAPTCHAs, bypass 401/403/429 responses, or spoof browser fingerprints.
+- Heavy visual resources (images, media, fonts, stylesheets) are blocked. JavaScript/XHR/fetch are allowed so client-side product grids can populate the DOM.
+- A small scroll is used to trigger lazy-loaded product grids; no product link is opened automatically.
+- Rendered HTML then flows through the same deterministic + AI + canonical normalization pipeline already used by v0.4.1.
+- Optional selected-product rendering is also available, but only through an explicit checkbox and only after the normal static product-page extraction returns no dependable record.
+- Rendered pages are cached in-process for 24 hours.
 
-The AI schema and universal catalog normalizer now carry `bottle_size_ml` when the page explicitly states a size such as 375 mL, 750 mL, or 1.5 L.
+## Deployment dependency
 
-The collector does **not** assume 750 mL merely because a size is absent.
+This feature requires:
 
-A reviewed non-750 mL row remains visible/exportable, but the normal comp-batch staging step holds it out instead of silently comparing its bottle price against ordinary 750 mL wines.
+1. Append `playwright>=1.55,<2` to the repository's existing `requirements.txt`.
+2. Add the included `packages.txt` at the repository root containing `chromium`.
 
-### 2. Special wine style is preserved
+No new API key is required. AI continues to use the existing `OPENAI_API_KEY`.
 
-A new `wine_style` field can carry explicit styles such as:
+## Traffic implications
 
-- Late Harvest
-- Dessert
-- Fortified
-- Sparkling
-- Table (only when explicitly supported)
-
-Late Harvest/Dessert and Fortified rows also receive the corresponding broad general category when appropriate so they do not behave like ordinary dry table wines.
-
-### 3. Estate consistency is hardened
-
-When product-local evidence explicitly supports an Estate designation and the AI correctly assigns `product_tier = Estate`, the final record can no longer remain contradictory with `estate = False`.
-
-Weak site-wide winery branding still does not qualify as Estate evidence.
-
-### 4. Modern-site-first authority remains unchanged
-
-The source hierarchy is still:
-
-1. documented provider feed/API
-2. structured product data / JSON-LD
-3. focused product-component extraction
-4. AI-assisted interpretation for noisy/incomplete selected product pages
-5. conservative deterministic fallback / human review
-
-The AI receives only bounded evidence from the HTML already fetched by the scanner; it does not make another request to the winery site.
-
-## Validation
-
-The regression suite includes the previous A&D, VinoShipper, Eberle, modern JSON-LD, and J. Rickards cases plus new tests for bottle size, Late Harvest style, Estate consistency, and non-standard-size handling.
+The normal path is still low-request. The rendered fallback is heavier and may create the exact page request plus supporting JavaScript/data requests. It is therefore intentionally manual and reserved for pages where the static path fails.

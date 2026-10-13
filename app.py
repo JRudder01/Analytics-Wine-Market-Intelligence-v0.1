@@ -37,6 +37,8 @@ from catalog_scraper import (
     CatalogScanError,
     WineOffer,
     scan_catalog,
+    scan_rendered_catalog,
+    rendered_browser_available,
     discover_product_links,
     scan_selected_product_pages,
     merge_offers,
@@ -86,7 +88,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.1</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.2</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -120,7 +122,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.1 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.2 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -435,8 +437,9 @@ elif page == "Data Hub (Admin)":
 - **Page cache:** repeated scans of the same URL can reuse a 24-hour in-process HTML cache; stale cached pages use ETag/Last-Modified conditional requests when the site provides them
 - **Access controls / rate limits:** HTTP 401, 403, or 429 is not bypassed and is not automatically retried
 - **Page size:** maximum 2 MB of HTML per fetched page
-- **JavaScript:** not executed
-- **Assets:** images, CSS, fonts, and scripts are not separately downloaded
+- **JavaScript:** not executed on the normal path. If the static path finds no product evidence, an explicit **Render this page once** button can launch a headless browser fallback
+- **Rendered fallback:** manual only; no clicks, login, CAPTCHA handling, or stealth/fingerprint spoofing. Images/media/fonts/stylesheets are blocked; scripts/XHR needed to populate products may load
+- **Assets:** the normal path downloads no page assets; the rendered fallback may request scripts/data needed by the page, while blocking heavy visual assets
 - **Database:** nothing is written permanently until you review the extracted rows, stage them, and use the normal GitHub batch commit
 
 The goal is minimal request volume and explicit human control rather than site-wide crawling.
@@ -455,6 +458,7 @@ The goal is minimal request volume and explicit human control rather than site-w
             "catalog_fetch", "catalog_offers", "catalog_winery_value",
             "catalog_product_links", "catalog_product_scan_summary",
             "catalog_product_scan_failures", "catalog_selected_offers",
+            "catalog_rendered_used",
         ]:
             st.session_state.pop(_key, None)
         st.session_state["catalog_session_parser_build"] = CATALOG_PARSER_BUILD
@@ -564,6 +568,7 @@ The goal is minimal request volume and explicit human control rather than site-w
             "catalog_fetch", "catalog_offers", "catalog_winery_value",
             "catalog_product_links", "catalog_product_scan_summary",
             "catalog_product_scan_failures", "catalog_selected_offers",
+            "catalog_rendered_used",
         ]:
             st.session_state.pop(key, None)
         st.session_state.catalog_scan_nonce = catalog_nonce + 1
@@ -618,6 +623,12 @@ The goal is minimal request volume and explicit human control rather than site-w
                 f"VinoShipper product feed processed · HTTP {catalog_fetch.status_code} · "
                 f"{catalog_fetch.request_note}. No individual product pages were opened."
             )
+        elif getattr(catalog_fetch, "provider", "") == "RenderedBrowser":
+            status_text = (
+                f"Rendered catalog page processed · HTTP {catalog_fetch.status_code} · "
+                f"{catalog_fetch.bytes_read / 1024:.0f} KB DOM · {catalog_fetch.robots_status} · {catalog_fetch.request_note}. "
+                "No product links were opened automatically."
+            )
         else:
             status_text = (
                 f"Catalog page processed · HTTP {catalog_fetch.status_code} · "
@@ -667,6 +678,16 @@ The goal is minimal request volume and explicit human control rather than site-w
             f"Selected: {selected_count}. Maximum 12 per batch. "
             "Selected pages are fetched sequentially with a short pause between network requests."
         )
+        allow_product_render = st.checkbox(
+            "Allow rendered fallback for selected pages only when the static page has no dependable product record",
+            value=False,
+            key=f"catalog_product_render_fallback_{catalog_nonce}",
+            help=(
+                "Manual opt-in. The scanner still tries the low-request static path first. "
+                "Only a selected page that produces no dependable record may then be loaded once in headless Chromium, "
+                "which can create an additional document request plus supporting script/data requests."
+            ),
+        )
         if st.button(
             f"Scan selected product pages ({selected_count})",
             type="secondary",
@@ -684,6 +705,7 @@ The goal is minimal request volume and explicit human control rather than site-w
                         ai_mode=ai_mode,
                         producer_hint=catalog_winery.strip(),
                         ai_model=get_catalog_ai_model() if ai_ready and ai_mode != "off" else None,
+                        allow_rendered_fallback=allow_product_render,
                     )
 
                 # Keep catalog-level candidates separate from explicitly fetched
@@ -711,6 +733,8 @@ The goal is minimal request volume and explicit human control rather than site-w
                             subregion=str(row.get("subregion") or ""),
                             alcohol_pct=None if pd.isna(row.get("alcohol_pct")) else row.get("alcohol_pct"),
                             cases_produced=None if pd.isna(row.get("cases_produced")) else row.get("cases_produced"),
+                            bottle_size_ml=None if pd.isna(row.get("bottle_size_ml")) else row.get("bottle_size_ml"),
+                            wine_style=str(row.get("wine_style") or ""),
                             estate=bool(row.get("estate", False)),
                             single_vineyard=bool(row.get("single_vineyard", False)),
                             product_tier=str(row.get("product_tier") or "Core"),
@@ -723,11 +747,13 @@ The goal is minimal request volume and explicit human control rather than site-w
                 st.session_state["catalog_selected_offers"] = selected_payload
                 st.session_state["catalog_offers"] = selected_payload
                 ai_used_count = sum("ai" in str(o.extraction_method or "").casefold() for o in new_offers)
+                rendered_used_count = sum("rendered" in str(o.extraction_method or "").casefold() for o in new_offers)
                 ai_note = f" AI interpreted {ai_used_count} record(s)." if ai_used_count else ""
+                render_note = f" Rendered fallback contributed to {rendered_used_count} record(s)." if rendered_used_count else ""
                 st.session_state["catalog_product_scan_summary"] = (
                     f"Processed {fetched_count} explicitly selected product page(s). "
                     f"Added/updated {len(new_offers)} dependable product record(s) with price/metadata where visible."
-                    f"{ai_note}"
+                    f"{ai_note}{render_note}"
                 )
                 st.session_state["catalog_product_scan_failures"] = failures
                 st.rerun()
@@ -917,9 +943,41 @@ The goal is minimal request volume and explicit human control rather than site-w
                 )
             else:
                 st.warning(
-                    "The page was fetched, but no dependable product + price records or likely wine product links were found in its static HTML/JSON-LD. "
-                    "The scan ends here rather than escalating to browser automation."
+                    "The static page was fetched, but no dependable product + price records or likely wine product links were found in its HTML/JSON-LD. "
+                    "No browser rendering has occurred automatically."
                 )
+                render_ready, render_detail = rendered_browser_available()
+                if render_ready:
+                    st.caption(
+                        "Optional rendered fallback: explicitly load this exact page once in headless Chromium so client-side product content can populate the DOM. "
+                        "This is a heavier request path and may load supporting JavaScript/data, but it will not click, log in, solve challenges, or open product pages automatically."
+                    )
+                    if st.button(
+                        "Render this page once (JavaScript fallback)",
+                        type="secondary",
+                        use_container_width=True,
+                        disabled=source_status == "Do not scan",
+                        key=f"catalog_render_once_btn_{catalog_nonce}",
+                    ):
+                        try:
+                            with st.spinner("Rendering the exact catalog page once and inspecting the resulting DOM…"):
+                                rendered_fetch, rendered_offers, rendered_links = scan_rendered_catalog(catalog_url)
+                            st.session_state["catalog_fetch"] = rendered_fetch
+                            st.session_state["catalog_offers"] = [o.to_dict() for o in rendered_offers]
+                            st.session_state["catalog_product_links"] = [link.to_dict() for link in rendered_links]
+                            st.session_state["catalog_winery_value"] = catalog_winery.strip()
+                            st.session_state["catalog_rendered_used"] = True
+                            st.session_state.pop("catalog_selected_offers", None)
+                            st.session_state.pop("catalog_product_scan_summary", None)
+                            st.session_state.pop("catalog_product_scan_failures", None)
+                            st.rerun()
+                        except CatalogScanError as exc:
+                            st.error(str(exc))
+                else:
+                    st.info(
+                        "Rendered fallback is not available in this deployment. "
+                        f"{render_detail} Add `playwright` to requirements.txt and `chromium` to packages.txt, then reboot the app."
+                    )
 
     st.divider()
     st.markdown("### Screenshot Intake")
@@ -1363,7 +1421,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.4.0 approach
+### v0.4.2 approach
 
 The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
@@ -1383,6 +1441,6 @@ The model is a market-positioning aid, not a guarantee of demand or sell-through
 
 **Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by an administrator. The AI extracts visible facts only; deterministic classification rules are applied afterward; a human must review/edit the proposed row before it is added to the session comp database.
 
-**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. v0.4.0 adds an AI interpretation fallback for selected product pages: strong provider/structured facts remain authoritative, while AI can interpret already-downloaded legacy/noisy HTML and must return field-level evidence. AI does not make an additional winery-site request. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
+**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. v0.4.x adds an AI interpretation fallback for selected product pages: strong provider/structured facts remain authoritative, while AI can interpret already-downloaded legacy/noisy HTML and must return field-level evidence. AI does not make an additional winery-site request. v0.4.2 adds an explicit rendered-page fallback for JavaScript storefronts only after the static path fails; it is manual, does not click/login/bypass challenges, and the rendered DOM re-enters the same canonical pipeline. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
         """
     )

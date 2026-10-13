@@ -6,6 +6,7 @@ import re
 import socket
 import time
 import unicodedata
+import shutil
 from difflib import SequenceMatcher
 from dataclasses import dataclass, asdict
 from datetime import date
@@ -20,7 +21,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
-CATALOG_PARSER_BUILD = "v0.4.1"
+CATALOG_PARSER_BUILD = "v0.4.2"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
@@ -30,6 +31,9 @@ MAX_REDIRECTS = 3
 _ROBOTS_CACHE: dict[str, tuple[float, RobotFileParser | None, str]] = {}
 _PAGE_CACHE: dict[str, tuple[float, str, str, str, str]] = {}  # ts, html, content_type, etag, last_modified
 _JSON_CACHE: dict[str, tuple[float, Any]] = {}
+_RENDER_CACHE: dict[str, tuple[float, str, str]] = {}  # ts, rendered_html, final_url
+RENDER_CACHE_TTL_SECONDS = 24 * 60 * 60
+RENDER_TIMEOUT_MS = 15_000
 VINOSHIPPER_HOSTS = {"vinoshipper.com", "www.vinoshipper.com"}
 
 PRICE_RE = re.compile(
@@ -1480,6 +1484,183 @@ def fetch_catalog_page(url: str) -> CatalogFetch:
         )
 
     raise CatalogScanError("The catalog page could not be fetched.")
+
+
+def rendered_browser_available() -> tuple[bool, str]:
+    """Return whether the optional headless-rendering dependency is usable.
+
+    This check is intentionally lazy so normal/provider/static scans do not pay a
+    browser dependency cost. On Streamlit Cloud the recommended deployment is the
+    Playwright Python package plus the system `chromium` package.
+    """
+    try:
+        import playwright.sync_api  # noqa: F401
+    except Exception as exc:
+        return False, f"Playwright is not installed ({exc})."
+
+    executable = (
+        shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+    )
+    if executable:
+        return True, f"system Chromium available at {executable}"
+
+    # A Playwright-managed browser may still be present even if no system binary
+    # is on PATH. We do not launch it here; the actual render call handles that.
+    return True, "Playwright available; browser availability will be checked at render time"
+
+
+def _launch_render_browser(playwright):
+    executable = (
+        shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+    )
+    kwargs = {
+        "headless": True,
+        "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+    }
+    if executable:
+        kwargs["executable_path"] = executable
+    return playwright.chromium.launch(**kwargs)
+
+
+def render_catalog_page(url: str) -> CatalogFetch:
+    """Render one exact public page with JavaScript after explicit user action.
+
+    This is a *manual fallback* for pages whose static HTML exposes no dependable
+    product evidence. It does not click, log in, solve challenges, or navigate
+    beyond the exact requested document. Images/media/fonts/stylesheets are
+    blocked to reduce traffic; scripts/XHR/fetch remain available so client-side
+    product data can populate the DOM. A small scroll is used only to trigger
+    lazy-loaded product grids.
+    """
+    requested = validate_public_url(url)
+    robots, robots_status = _get_robots(requested)
+    if robots is not None and not robots.can_fetch(USER_AGENT, requested):
+        raise CatalogScanError("robots.txt disallows this page for the configured research user agent.")
+
+    now = time.time()
+    cache_key = requested.casefold()
+    cached = _RENDER_CACHE.get(cache_key)
+    if cached and now - cached[0] < RENDER_CACHE_TTL_SECONDS:
+        _, html, final_url = cached
+        return CatalogFetch(
+            requested_url=requested,
+            final_url=final_url,
+            status_code=200,
+            content_type="text/html",
+            html=html,
+            bytes_read=len(html.encode("utf-8", errors="ignore")),
+            robots_status=robots_status,
+            request_note="24-hour rendered-page cache hit (no browser load)",
+            provider="RenderedBrowser",
+            provider_note="Explicit JavaScript render fallback used",
+            provider_requests=0,
+        )
+
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    except Exception as exc:
+        raise CatalogScanError(
+            "Rendered fallback is unavailable because Playwright is not installed. "
+            "Add playwright to requirements.txt and chromium to packages.txt."
+        ) from exc
+
+    browser = None
+    try:
+        with sync_playwright() as pw:
+            browser = _launch_render_browser(pw)
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                locale="en-US",
+                java_script_enabled=True,
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.8"},
+            )
+            page = context.new_page()
+
+            def _route_handler(route):
+                request = route.request
+                # Keep the render substantially lighter than a normal browser visit.
+                if request.resource_type in {"image", "media", "font", "stylesheet"}:
+                    route.abort()
+                    return
+                route.continue_()
+
+            page.route("**/*", _route_handler)
+            response = page.goto(requested, wait_until="domcontentloaded", timeout=RENDER_TIMEOUT_MS)
+            status = response.status if response is not None else 200
+            if status in {401, 403}:
+                raise CatalogScanError(f"The site returned HTTP {status}; the rendered fallback will not bypass it.")
+            if status == 429:
+                raise CatalogScanError("The site returned HTTP 429; the rendered fallback will not retry automatically.")
+            if status >= 400:
+                raise CatalogScanError(f"The rendered page returned HTTP {status}.")
+
+            try:
+                page.wait_for_load_state("networkidle", timeout=4_000)
+            except PlaywrightTimeoutError:
+                pass
+            # Trigger lazy product grids without clicking or opening another page.
+            try:
+                page.evaluate("window.scrollTo(0, Math.min(document.body.scrollHeight, 4000))")
+                page.wait_for_timeout(900)
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(900)
+            except Exception:
+                pass
+
+            final_url = str(page.url or requested)
+            validate_public_url(final_url)
+            if _site_key(final_url) != _site_key(requested):
+                raise CatalogScanError("The rendered page navigated to a different site; scan stopped.")
+            html = page.content()
+            if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
+                raise CatalogScanError("The rendered DOM exceeded the collector's 2 MB safety limit.")
+            context.close()
+            browser.close()
+            browser = None
+    except CatalogScanError:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        raise
+    except Exception as exc:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        raise CatalogScanError(f"Rendered fallback failed: {exc}") from exc
+
+    _RENDER_CACHE[cache_key] = (now, html, final_url)
+    return CatalogFetch(
+        requested_url=requested,
+        final_url=final_url,
+        status_code=200,
+        content_type="text/html",
+        html=html,
+        bytes_read=len(html.encode("utf-8", errors="ignore")),
+        robots_status=robots_status,
+        request_note="explicit JavaScript render fallback",
+        provider="RenderedBrowser",
+        provider_note="Rendered exact page once; no clicks/login/challenge bypass",
+        provider_requests=1,
+    )
+
+
+def scan_rendered_catalog(url: str) -> tuple[CatalogFetch, list[WineOffer], list[ProductLink]]:
+    """Explicitly render one catalog/category page and parse its resulting DOM."""
+    fetched = render_catalog_page(url)
+    offers = extract_catalog_offers(fetched.html, fetched.final_url)
+    links = discover_product_links(fetched.html, fetched.final_url)
+    return fetched, offers, links
+
 
 def _iter_json_nodes(value: Any) -> Iterable[dict[str, Any]]:
     if isinstance(value, dict):
@@ -2960,6 +3141,8 @@ def scan_selected_product_pages(
     producer_hint: str = "",
     ai_model: str | None = None,
     ai_extractor=None,
+    allow_rendered_fallback: bool = False,
+    render_fetcher=None,
 ) -> tuple[list[WineOffer], list[dict[str, str]], int]:
     """Fetch only pages the user explicitly selected, once each, sequentially.
 
@@ -2998,6 +3181,31 @@ def scan_selected_product_pages(
                 # Reuse the generic catalog parser before AI so structured/static
                 # evidence is always attempted first.
                 page_offers = extract_catalog_offers(fetched.html, fetched.final_url)
+
+            # Optional browser fallback is explicit and only runs when the normal
+            # static path found no dependable product record. This may create a
+            # second document request for that selected page plus supporting JS/XHR.
+            if not page_offers and allow_rendered_fallback:
+                try:
+                    renderer = render_fetcher or render_catalog_page
+                    rendered = renderer(url)
+                    # Use the rendered DOM as the evidence source even when the
+                    # deterministic parser still cannot form a complete offer;
+                    # AI fallback may be able to interpret the rendered product.
+                    fetched = rendered
+                    page_offers = _extract_product_page_offers(rendered.html, rendered.final_url)
+                    if not page_offers:
+                        page_offers = extract_catalog_offers(rendered.html, rendered.final_url)
+                    if page_offers:
+                        for _offer in page_offers:
+                            method = str(_offer.extraction_method or "").strip()
+                            if "rendered" not in method.casefold():
+                                _offer.extraction_method = (method + " + Rendered DOM").strip(" +")
+                except CatalogScanError as exc:
+                    failures.append({
+                        "url": url,
+                        "error": f"Static page had no dependable product record; rendered fallback also failed: {exc}",
+                    })
 
             if should_use_ai_for_product_page(page_offers, ai_mode):
                 try:

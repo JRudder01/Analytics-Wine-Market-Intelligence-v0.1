@@ -1,0 +1,2 @@
+# Append this line to the repository's existing requirements.txt
+playwright>=1.55,<2

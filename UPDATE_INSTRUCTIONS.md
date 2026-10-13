@@ -1,23 +1,25 @@
-# v0.4.1 update instructions
+# Update to v0.4.2
 
-Starting from v0.4.0:
+Upload/replace these repository root files:
 
-1. Replace root `app.py`.
-2. Replace root `catalog_scraper.py`.
-3. Replace root `ai_catalog_extractor.py`.
-4. Recommended: replace `tests/test_catalog_enrichment.py` and `tests/test_ai_catalog_extractor.py`.
+- `app.py`
+- `catalog_scraper.py`
+- `ai_catalog_extractor.py` (unchanged logic from v0.4.1, included for a complete patch set)
+- `packages.txt` **new**
 
-No database migration, new API key, or new Python dependency is required.
+Dependency step:
 
-After deployment, verify both the app header and `Catalog parser build` show `v0.4.1`.
+- Open your existing `requirements.txt` and append this one line if it is not already present:
 
-## Recommended regression test
+  `playwright>=1.55,<2`
 
-Re-run the same five J. Rickards wines with **AI fallback (recommended)**.
+The included `requirements_additions.txt` contains that exact line for copy/paste. Do **not** replace your existing requirements.txt with requirements_additions.txt.
 
-Expected changes from v0.4.0:
+Recommended test files:
 
-- Five Sisters should have consistent Estate status/tier when the product-local Estate wording is present.
-- Twilight Late Harvest Viognier should show `Bottle mL = 375` and `Wine style = Late Harvest`.
-- Twilight should remain reviewable/exportable but should be held out of the normal comp batch because its 375 mL price is not directly comparable to standard 750 mL pricing.
-- The prior v0.4.0 fixes for quantity discounts, club-price ambiguity, Rosé navigation contamination, and complex blend extraction should remain intact.
+- `tests/test_catalog_enrichment.py`
+- `tests/test_ai_catalog_extractor.py`
+
+Then let Streamlit rebuild/reboot. Confirm both the app header and **Catalog parser build** show `v0.4.2`.
+
+For Sanger Wines, run the normal static scan first. If it again returns no products/links, click **Render this page once (JavaScript fallback)**. The browser fallback should not run before that explicit click.
