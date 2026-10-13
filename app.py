@@ -86,7 +86,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.0</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.1</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -120,7 +120,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.0 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.1 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -743,8 +743,9 @@ The goal is minimal request volume and explicit human control rather than site-w
         catalog_df = pd.DataFrame(catalog_offers_data)
         for col, default in {
             "varietal": "", "graph_category": "", "general_category": "", "region": "", "subregion": "",
-            "alcohol_pct": np.nan, "cases_produced": np.nan, "estate": False, "single_vineyard": False,
-            "product_tier": "Core", "availability_status": "", "extraction_method": "",
+            "alcohol_pct": np.nan, "cases_produced": np.nan, "bottle_size_ml": np.nan, "wine_style": "",
+            "estate": False, "single_vineyard": False, "product_tier": "Core",
+            "availability_status": "", "extraction_method": "",
         }.items():
             if col not in catalog_df.columns:
                 catalog_df[col] = default
@@ -752,8 +753,9 @@ The goal is minimal request volume and explicit human control rather than site-w
         review_cols = [
             "stage", "wine", "vintage", "regular_price", "sale_price", "club_price",
             "varietal", "graph_category", "general_category", "region", "subregion",
-            "alcohol_pct", "cases_produced", "estate", "single_vineyard", "product_tier",
-            "availability_status", "extraction_method", "product_url", "confidence",
+            "alcohol_pct", "cases_produced", "bottle_size_ml", "wine_style",
+            "estate", "single_vineyard", "product_tier", "availability_status",
+            "extraction_method", "product_url", "confidence",
         ]
         catalog_editable = st.data_editor(
             catalog_df[review_cols],
@@ -770,6 +772,8 @@ The goal is minimal request volume and explicit human control rather than site-w
                 "club_price": st.column_config.NumberColumn("Club / member", format="$%.2f"),
                 "alcohol_pct": st.column_config.NumberColumn("ABV %", format="%.1f"),
                 "cases_produced": st.column_config.NumberColumn("Cases", format="%d"),
+                "bottle_size_ml": st.column_config.NumberColumn("Bottle mL", format="%d", help="Explicit bottle size when stated; blank means unknown."),
+                "wine_style": st.column_config.TextColumn("Wine style", help="Special style such as Late Harvest, Dessert, Fortified, or Sparkling when explicitly supported."),
                 "estate": st.column_config.CheckboxColumn("Estate"),
                 "single_vineyard": st.column_config.CheckboxColumn("Single vineyard"),
                 "extraction_method": st.column_config.TextColumn("Extraction"),
@@ -778,8 +782,8 @@ The goal is minimal request volume and explicit human control rather than site-w
             key=f"catalog_editor_{catalog_nonce}",
         )
         st.caption(
-            "Review/edit these fields before staging. Product pages can contain member-only products, promotions, alternate bottle sizes, "
-            "or ambiguous marketing language; human approval remains required."
+            "Review/edit these fields before staging. Explicit bottle size and special wine style are preserved when available. "
+            "Non-standard bottle sizes are blocked from the normal comp batch unless normalized separately; human approval remains required."
         )
         ai_rows = [
             row for row in catalog_offers_data
@@ -816,6 +820,7 @@ The goal is minimal request volume and explicit human control rather than site-w
                 staged_records = []
                 duplicate_count = 0
                 skipped_count = 0
+                nonstandard_size_count = 0
                 for _, row in selected_catalog_rows.iterrows():
                     price = None
                     price_type = "Winery retail"
@@ -830,6 +835,13 @@ The goal is minimal request volume and explicit human control rather than site-w
                         price_type = "Wine club/member price"
                     if price is None:
                         skipped_count += 1
+                        continue
+                    bottle_value = pd.to_numeric(row.get("bottle_size_ml"), errors="coerce")
+                    if pd.notna(bottle_value) and int(round(float(bottle_value))) != 750:
+                        # A $34 375 mL dessert wine is not directly comparable to a
+                        # $34 750 mL table wine. Keep it reviewable/exportable, but do
+                        # not silently stage it into the ordinary pricing database.
+                        nonstandard_size_count += 1
                         continue
                     vint_text = str(row.get("vintage") or "").strip()
                     vintage_value = int(vint_text) if re.fullmatch(r"(?:19|20)\d{2}", vint_text) else np.nan
@@ -874,11 +886,13 @@ The goal is minimal request volume and explicit human control rather than site-w
                     st.session_state.uploaded_comps = normalize_comp_data(combined_pending)
                     st.success(
                         f"Staged {len(staged_records)} catalog observation(s) for the normal GitHub batch commit. "
-                        f"Exact duplicates skipped: {duplicate_count}. Other incomplete rows skipped: {skipped_count}."
+                        f"Exact duplicates skipped: {duplicate_count}. Other incomplete rows skipped: {skipped_count}. "
+                        f"Non-standard bottle sizes held out: {nonstandard_size_count}."
                     )
                 else:
                     st.info(
-                        f"No new catalog rows were staged. Exact duplicates: {duplicate_count}; incomplete/no-price rows: {skipped_count}."
+                        f"No new catalog rows were staged. Exact duplicates: {duplicate_count}; incomplete/no-price rows: {skipped_count}; "
+                        f"non-standard bottle sizes held out: {nonstandard_size_count}."
                     )
 
         with st.expander("Download reviewed catalog data (optional)"):

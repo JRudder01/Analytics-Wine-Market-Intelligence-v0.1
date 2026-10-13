@@ -24,6 +24,8 @@ AI_CATALOG_SCHEMA = {
         "subregion": {"type": ["string", "null"]},
         "alcohol_pct": {"type": ["number", "null"]},
         "cases_produced": {"type": ["integer", "null"]},
+        "bottle_size_ml": {"type": ["integer", "null"]},
+        "wine_style": {"type": ["string", "null"]},
         "estate_status": {"type": "string", "enum": ["Yes", "No", "Unknown"]},
         "single_vineyard_status": {"type": "string", "enum": ["Yes", "No", "Unknown"]},
         "product_tier": {"type": ["string", "null"]},
@@ -43,6 +45,8 @@ AI_CATALOG_SCHEMA = {
                 "subregion": {"type": ["string", "null"]},
                 "alcohol_pct": {"type": ["string", "null"]},
                 "cases_produced": {"type": ["string", "null"]},
+                "bottle_size_ml": {"type": ["string", "null"]},
+                "wine_style": {"type": ["string", "null"]},
                 "estate_status": {"type": ["string", "null"]},
                 "single_vineyard_status": {"type": ["string", "null"]},
                 "product_tier": {"type": ["string", "null"]},
@@ -51,7 +55,8 @@ AI_CATALOG_SCHEMA = {
             "required": [
                 "wine", "vintage", "regular_price", "sale_price", "club_price",
                 "varietal", "region", "subregion", "alcohol_pct", "cases_produced",
-                "estate_status", "single_vineyard_status", "product_tier", "availability_status",
+                "bottle_size_ml", "wine_style", "estate_status", "single_vineyard_status",
+                "product_tier", "availability_status",
             ],
         },
         "warnings": {"type": "array", "items": {"type": "string"}},
@@ -59,8 +64,9 @@ AI_CATALOG_SCHEMA = {
     "required": [
         "wine", "vintage", "regular_price", "sale_price", "club_price", "currency",
         "varietal", "graph_category", "general_category", "region", "subregion",
-        "alcohol_pct", "cases_produced", "estate_status", "single_vineyard_status",
-        "product_tier", "availability_status", "overall_confidence", "evidence", "warnings",
+        "alcohol_pct", "cases_produced", "bottle_size_ml", "wine_style",
+        "estate_status", "single_vineyard_status", "product_tier", "availability_status",
+        "overall_confidence", "evidence", "warnings",
     ],
 }
 
@@ -94,11 +100,15 @@ Wine identity/category rules:
 - A disclosed blend composition does not automatically erase a marketed varietal identity. Example: a wine explicitly sold as Cabernet Sauvignon can remain Cabernet Sauvignon even if minor blending grapes are disclosed.
 - G-S-M/GSM means a Rhône-style Grenache/Syrah/Mourvèdre blend when that identity is explicit.
 - Late-harvest/sweet wording may support Dessert as the general category when clearly tied to the product.
+- bottle_size_ml: capture the explicit bottle size in milliliters when the product page states it (e.g. 375 mL, 750 mL, 1.5 L -> 1500). Do NOT assume 750 mL merely because no size is shown.
+- wine_style: use a concise explicit style only when supported, such as Late Harvest, Dessert, Fortified, Sparkling, or Table. Leave null when the page does not establish a special style.
+- A non-standard bottle size or dessert/fortified style is commercially important and should not be silently treated as an ordinary 750 mL table-wine comparable.
 
 Estate/single-vineyard/tier rules:
 - estate_status = Yes only when the finished wine is explicitly estate-designated or all fruit for the finished wine is explicitly estate-grown/sourced. Unknown when not stated.
 - single_vineyard_status = Yes only when the finished wine is clearly from one named vineyard or explicitly called single-vineyard. Multiple vineyard sources => No when explicit; otherwise Unknown.
 - product_tier should be one of Core, Estate, Limited, Reserve, Flagship when explicitly supported. Do not match substrings such as "preserve" as Reserve.
+- Keep estate_status and product_tier internally consistent: if the product is explicitly marketed as Estate and that evidence supports product_tier=Estate, estate_status should be Yes. Conversely, do not set Estate tier from weak site-wide winery branding.
 
 Evidence rules:
 - For every non-null extracted fact, provide a short evidence snippet or concise paraphrase in the corresponding evidence field.
@@ -198,9 +208,18 @@ def validate_ai_catalog_result(result: dict[str, Any]) -> dict[str, Any]:
         cases = None
     out["cases_produced"] = cases
 
+    bottle_size = out.get("bottle_size_ml")
+    try:
+        bottle_size = int(round(float(bottle_size))) if bottle_size is not None else None
+    except Exception:
+        bottle_size = None
+    if bottle_size is not None and not (100 <= bottle_size <= 20_000):
+        bottle_size = None
+    out["bottle_size_ml"] = bottle_size
+
     for field in [
         "wine", "currency", "varietal", "graph_category", "general_category",
-        "region", "subregion", "product_tier", "availability_status", "overall_confidence",
+        "region", "subregion", "wine_style", "product_tier", "availability_status", "overall_confidence",
     ]:
         value = out.get(field)
         out[field] = None if value is None else re.sub(r"\s+", " ", str(value)).strip() or None
@@ -209,6 +228,19 @@ def validate_ai_catalog_result(result: dict[str, Any]) -> dict[str, Any]:
         out["overall_confidence"] = "Moderate"
     if out.get("product_tier") not in {None, "Core", "Estate", "Limited", "Reserve", "Flagship"}:
         out["product_tier"] = None
+    style_alias = {
+        "late harvest": "Late Harvest",
+        "dessert": "Dessert",
+        "fortified": "Fortified",
+        "port": "Fortified",
+        "port-style": "Fortified",
+        "sparkling": "Sparkling",
+        "table": "Table",
+        "table wine": "Table",
+        "other": "Other",
+    }
+    if out.get("wine_style") is not None:
+        out["wine_style"] = style_alias.get(str(out.get("wine_style") or "").strip().casefold())
     if out.get("estate_status") not in {"Yes", "No", "Unknown"}:
         out["estate_status"] = "Unknown"
     if out.get("single_vineyard_status") not in {"Yes", "No", "Unknown"}:
@@ -225,7 +257,8 @@ def validate_ai_catalog_result(result: dict[str, Any]) -> dict[str, Any]:
         "wine": "wine", "vintage": "vintage", "regular_price": "regular_price",
         "sale_price": "sale_price", "club_price": "club_price", "varietal": "varietal",
         "region": "region", "subregion": "subregion", "alcohol_pct": "alcohol_pct",
-        "cases_produced": "cases_produced", "product_tier": "product_tier",
+        "cases_produced": "cases_produced", "bottle_size_ml": "bottle_size_ml",
+        "wine_style": "wine_style", "product_tier": "product_tier",
         "availability_status": "availability_status",
     }
     for field, ev_field in evidence_map.items():
@@ -236,6 +269,16 @@ def validate_ai_catalog_result(result: dict[str, Any]) -> dict[str, Any]:
         out["estate_status"] = "Unknown"
     if out.get("single_vineyard_status") != "Unknown" and not out["evidence"].get("single_vineyard_status"):
         out["single_vineyard_status"] = "Unknown"
+
+    # Estate consistency: an explicit Estate tier backed by Estate evidence is also
+    # evidence that the finished product is estate-designated. This repairs cases
+    # where the model classified the tier correctly but left the boolean Unknown/No.
+    tier_evidence = str(out["evidence"].get("product_tier") or "")
+    wine_evidence = str(out["evidence"].get("wine") or "")
+    if out.get("product_tier") == "Estate" and re.search(r"\bestate\b", f"{tier_evidence} {wine_evidence}", re.I):
+        out["estate_status"] = "Yes"
+        if not out["evidence"].get("estate_status"):
+            out["evidence"]["estate_status"] = _clean_snippet(tier_evidence or wine_evidence) or None
 
     return out
 

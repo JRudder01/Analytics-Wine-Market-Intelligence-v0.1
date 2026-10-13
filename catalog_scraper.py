@@ -20,7 +20,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
-CATALOG_PARSER_BUILD = "v0.4.0"
+CATALOG_PARSER_BUILD = "v0.4.1"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
@@ -80,6 +80,8 @@ class WineOffer:
     subregion: str = ""
     alcohol_pct: float | None = None
     cases_produced: int | None = None
+    bottle_size_ml: int | None = None
+    wine_style: str = ""
     estate: bool = False
     single_vineyard: bool = False
     product_tier: str = "Core"
@@ -853,6 +855,8 @@ def finalize_vinoshipper_offer_dicts(rows: list[dict[str, Any]], producer_id: st
             subregion=str(row.get("subregion") or ""),
             alcohol_pct=_none_if_nan(row.get("alcohol_pct")),
             cases_produced=_none_if_nan(row.get("cases_produced")),
+            bottle_size_ml=_none_if_nan(row.get("bottle_size_ml")),
+            wine_style=str(row.get("wine_style") or ""),
             estate=bool(row.get("estate", False)),
             single_vineyard=bool(row.get("single_vineyard", False)),
             product_tier=str(row.get("product_tier") or "Core"),
@@ -880,6 +884,51 @@ _ALT_BOTTLE_SIZE_RE = re.compile(
     r"\b(?:1\.?5|3|6|9|12)\s*[lL]\b|\bmagnum\b|\bjeroboam\b|\bdouble magnum\b)",
     re.I,
 )
+
+
+def _extract_bottle_size_ml(*values: Any) -> int | None:
+    """Extract an explicitly stated bottle size without assuming a default.
+
+    This is intentionally conservative. It recognizes common wine formats but
+    returns None when the page/evidence does not actually state a size.
+    """
+    text = " ".join(str(v or "") for v in values if v not in (None, ""))
+    if not text:
+        return None
+    lower = text.casefold()
+    named = [
+        (r"\bhalf[- ]?bottle\b", 375),
+        (r"\bsplit\b", 187),
+        (r"\bmagnum\b", 1500),
+        (r"\bdouble magnum\b", 3000),
+        (r"\bjeroboam\b", 3000),
+    ]
+    for pattern, size in named:
+        if re.search(pattern, lower, re.I):
+            return size
+    m = re.search(r"\b(187|200|250|375|500|620|700|720|750|1000)\s*m(?:l|ℓ)\b", text, re.I)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(1(?:\.0)?|1\.5|3|4\.5|5|6|9|12|15|18)\s*l(?:itre|iter)?s?\b", text, re.I)
+    if m:
+        return int(round(float(m.group(1)) * 1000))
+    return None
+
+
+def _infer_wine_style(wine: str, general_category: str, evidence: str, current: str = "") -> str:
+    existing = _clean_name(current)
+    if existing:
+        return existing
+    text = f"{wine} {general_category} {evidence}"
+    if re.search(r"\blate[- ]?harvest\b", text, re.I):
+        return "Late Harvest"
+    if re.search(r"\b(?:dessert wine|ice wine|icewine|botryti[sz]ed|sauternes[- ]?style)\b", text, re.I):
+        return "Dessert"
+    if re.search(r"\b(?:fortified|port[- ]?style|vintage port|tawny port)\b", text, re.I):
+        return "Fortified"
+    if re.search(r"\b(?:sparkling|méthode traditionnelle|methode traditionnelle|champenoise)\b", text, re.I):
+        return "Sparkling"
+    return ""
 
 
 def _is_reviewable_wine_offer(offer: WineOffer) -> bool:
@@ -928,6 +977,15 @@ def _finalize_catalog_offer(offer: WineOffer, provider_id: str = "") -> WineOffe
         offer.graph_category = _infer_graph_category(offer.varietal, offer.wine, offer.evidence)
     offer.general_category = _infer_general_category(offer.graph_category, offer.varietal, offer.wine)
     offer.region, offer.subregion = _normalize_offer_geography(offer.region, offer.subregion)
+    if offer.bottle_size_ml is None:
+        offer.bottle_size_ml = _extract_bottle_size_ml(offer.wine, offer.evidence)
+    offer.wine_style = _infer_wine_style(offer.wine, offer.general_category, offer.evidence, offer.wine_style)
+    if offer.wine_style in {"Late Harvest", "Dessert"} and offer.general_category in {"", "White", "Other"}:
+        offer.general_category = "Dessert"
+    elif offer.wine_style == "Fortified":
+        offer.general_category = "Fortified"
+    elif offer.wine_style == "Sparkling":
+        offer.general_category = "Sparkling"
 
     title_has_reserve = bool(re.search(r"\breserve\b", offer.wine or "", re.I))
     evidence_has_reserve = bool(re.search(r"\breserve\b", offer.evidence or "", re.I))
@@ -942,6 +1000,8 @@ def _finalize_catalog_offer(offer: WineOffer, provider_id: str = "") -> WineOffe
         else:
             offer.product_tier = "Core"
     offer.product_tier = offer.product_tier or "Core"
+    if offer.product_tier == "Estate" and re.search(r"\bestate\b", f"{offer.wine} {offer.evidence}", re.I):
+        offer.estate = True
 
     has_price = any(x is not None for x in (offer.regular_price, offer.sale_price, offer.club_price))
     strong_identity = bool(offer.wine and offer.vintage and offer.graph_category and offer.graph_category != "Other")
@@ -999,6 +1059,8 @@ def finalize_catalog_offer_dicts(rows: list[dict[str, Any]], provider_id: str = 
             subregion=str(row.get("subregion") or ""),
             alcohol_pct=_none_if_nan(row.get("alcohol_pct")),
             cases_produced=_none_if_nan(row.get("cases_produced")),
+            bottle_size_ml=_none_if_nan(row.get("bottle_size_ml")),
+            wine_style=str(row.get("wine_style") or ""),
             estate=bool(row.get("estate", False)),
             single_vineyard=bool(row.get("single_vineyard", False)),
             product_tier=str(row.get("product_tier") or "Core"),
@@ -2634,8 +2696,8 @@ def _ai_evidence_summary(result: dict[str, Any]) -> str:
     pieces = []
     for key in (
         "wine", "regular_price", "sale_price", "club_price", "varietal", "region",
-        "subregion", "alcohol_pct", "cases_produced", "estate_status",
-        "single_vineyard_status", "product_tier", "availability_status",
+        "subregion", "alcohol_pct", "cases_produced", "bottle_size_ml", "wine_style",
+        "estate_status", "single_vineyard_status", "product_tier", "availability_status",
     ):
         val = str(evidence.get(key) or "").strip()
         if val:
@@ -2730,6 +2792,8 @@ def merge_ai_product_result(
         subregion=str(semantic("subregion", "") or ""),
         alcohol_pct=semantic("alcohol_pct", None),
         cases_produced=semantic("cases_produced", None),
+        bottle_size_ml=semantic("bottle_size_ml", None),
+        wine_style=str(semantic("wine_style", "") or ""),
         estate=estate,
         single_vineyard=single,
         product_tier=str(semantic("product_tier", "Core") or "Core"),

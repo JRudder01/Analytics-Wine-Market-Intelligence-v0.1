@@ -1,45 +1,47 @@
-# Wine Market Intelligence v0.4.0 — AI-Assisted Catalog Collector
+# Wine Market Intelligence v0.4.1 — Bottle/Style Safeguards
 
-This build changes the catalog collector from a progressively larger HTML-rule parser into a **modern-site-first deterministic collector with a conservative AI interpretation fallback**.
+This is a focused follow-up to the v0.4.0 AI-assisted catalog collector.
 
 ## What changes
 
-The source hierarchy is now:
+### 1. Bottle size is now a first-class extracted fact
 
-1. documented provider feed/API when available
+The AI schema and universal catalog normalizer now carry `bottle_size_ml` when the page explicitly states a size such as 375 mL, 750 mL, or 1.5 L.
+
+The collector does **not** assume 750 mL merely because a size is absent.
+
+A reviewed non-750 mL row remains visible/exportable, but the normal comp-batch staging step holds it out instead of silently comparing its bottle price against ordinary 750 mL wines.
+
+### 2. Special wine style is preserved
+
+A new `wine_style` field can carry explicit styles such as:
+
+- Late Harvest
+- Dessert
+- Fortified
+- Sparkling
+- Table (only when explicitly supported)
+
+Late Harvest/Dessert and Fortified rows also receive the corresponding broad general category when appropriate so they do not behave like ordinary dry table wines.
+
+### 3. Estate consistency is hardened
+
+When product-local evidence explicitly supports an Estate designation and the AI correctly assigns `product_tier = Estate`, the final record can no longer remain contradictory with `estate = False`.
+
+Weak site-wide winery branding still does not qualify as Estate evidence.
+
+### 4. Modern-site-first authority remains unchanged
+
+The source hierarchy is still:
+
+1. documented provider feed/API
 2. structured product data / JSON-LD
 3. focused product-component extraction
-4. AI-assisted interpretation for legacy, noisy, incomplete, or otherwise ambiguous selected product pages
-5. deterministic fallback / human review
+4. AI-assisted interpretation for noisy/incomplete selected product pages
+5. conservative deterministic fallback / human review
 
-AI is deliberately **not** the authority when the site already supplies reliable structured facts.
+The AI receives only bounded evidence from the HTML already fetched by the scanner; it does not make another request to the winery site.
 
-## AI request behavior
+## Validation
 
-- AI runs only on product pages the administrator explicitly selects.
-- In the default **AI fallback** mode, complete High-confidence JSON-LD records skip AI.
-- AI receives bounded text/structured evidence from HTML the scanner has already downloaded. It does not make another request to the winery site.
-- Every AI result uses a strict structured schema.
-- Non-null facts are expected to include field-level supporting evidence.
-- Deterministic sanity checks reject implausible vintages, ABV, prices, cases, and unsupported fields.
-- Unknown facts are supposed to remain blank rather than be guessed.
-- Human review remains required before staging and GitHub commit.
-
-## Pricing safeguards
-
-The AI instructions explicitly distinguish:
-
-- ordinary public bottle price
-- genuine sale/promotion price
-- explicit numeric club/member price
-- quantity/case discounts such as 12+ bottle pricing
-
-Quantity discounts are not stored as sale or club prices.
-
-## Modern sites stay preferred
-
-Provider feeds and strong structured data retain higher authority than AI. If a modern JSON-LD product has a dependable name/price, AI cannot silently replace those facts during enrichment.
-
-## Current limitation
-
-This build interprets **HTML already available to the low-request collector**. It does not execute JavaScript or operate a browser. A site that exposes no useful product evidence until client-side JavaScript runs can still require the existing screenshot workflow or a future explicitly controlled browser-agent layer.
+The regression suite includes the previous A&D, VinoShipper, Eberle, modern JSON-LD, and J. Rickards cases plus new tests for bottle size, Late Harvest style, Estate consistency, and non-standard-size handling.

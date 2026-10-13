@@ -995,3 +995,34 @@ def test_selected_page_ai_path_uses_fake_extractor_without_extra_site_logic(monk
     assert offers[0].graph_category == "Bordeaux Blend"
     assert offers[0].sale_price is None
     assert not failures
+
+
+
+def test_universal_finalizer_detects_nonstandard_size_and_late_harvest_style():
+    from catalog_scraper import WineOffer, finalize_catalog_offers
+    row = WineOffer(
+        wine="Twilight Late Harvest Viognier", vintage="2018", regular_price=34.0,
+        sale_price=None, club_price=None, currency="USD",
+        product_url="https://example.com/twilight", evidence="375 mL Late Harvest dessert wine",
+        extraction_method="Selected product page fallback", confidence="Moderate",
+        varietal="Viognier", graph_category="Viognier", general_category="White",
+    )
+    out = finalize_catalog_offers([row])[0]
+    assert out.bottle_size_ml == 375
+    assert out.wine_style == "Late Harvest"
+    assert out.general_category == "Dessert"
+
+
+def test_universal_finalizer_estate_tier_and_explicit_estate_text_set_estate_true():
+    from catalog_scraper import WineOffer, finalize_catalog_offers
+    row = WineOffer(
+        wine="Five Sisters Cabernet Sauvignon", vintage="2023", regular_price=49.0,
+        sale_price=None, club_price=None, currency="USD",
+        product_url="https://example.com/five-sisters", evidence="Estate Five Sisters Blend Cabernet Sauvignon",
+        extraction_method="AI-assisted product page", confidence="Moderate",
+        varietal="Cabernet Sauvignon", graph_category="Cabernet Sauvignon", general_category="Red",
+        product_tier="Estate", estate=False,
+    )
+    out = finalize_catalog_offers([row])[0]
+    assert out.product_tier == "Estate"
+    assert out.estate is True
