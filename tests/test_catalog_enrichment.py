@@ -631,7 +631,7 @@ def test_single_varietal_field_stops_at_appellation_label():
     """
     offers = _extract_product_page_offers(html, "https://example.com/product/vbcab")
     assert len(offers) == 1
-    assert offers[0].varietal == "100% Cabernet Sauvignon"
+    assert offers[0].varietal == "Cabernet Sauvignon"
     assert offers[0].graph_category == "Cabernet Sauvignon"
 
 
@@ -690,3 +690,33 @@ def test_review_gate_excludes_merch_navigation_and_nonstandard_bottle_sizes():
     ])
     names = {o.wine for o in finalized}
     assert names == {"Vintage of Valor", "Cabernet Sauvignon"}
+
+
+def test_reserve_tier_requires_whole_word_not_preserve_prose():
+    from catalog_scraper import _extract_product_metadata
+
+    text = (
+        "2024 Côtes du Rôbles Rouge. The élevage preserves freshness and vibrant fruit. "
+        "56% Grenache, 38% Syrah, 6% Mourvèdre. Appellation Paso Robles."
+    )
+    meta = _extract_product_metadata("2024 Côtes du Rôbles Rouge", text)
+    assert meta["product_tier"] == "Core"
+
+
+def test_explicit_reserve_title_still_maps_to_reserve():
+    from catalog_scraper import _extract_product_metadata
+
+    text = "2024 Reserve Chardonnay. 100% Chardonnay. Appellation Paso Robles."
+    meta = _extract_product_metadata("2024 Reserve Chardonnay", text)
+    assert meta["product_tier"] == "Reserve"
+
+
+def test_single_varietal_drops_100_percent_and_estate_qualifier():
+    from catalog_scraper import _normalize_varietal_aliases
+
+    assert _normalize_varietal_aliases("100% Estate Cabernet Sauvignon") == "Cabernet Sauvignon"
+    assert _normalize_varietal_aliases("100% Chardonnay") == "Chardonnay"
+    # Blend composition percentages remain meaningful and must be retained.
+    assert _normalize_varietal_aliases("56% Grenache, 38% Syrah, 6% Mourvèdre") == (
+        "56% Grenache, 38% Syrah, 6% Mourvèdre"
+    )

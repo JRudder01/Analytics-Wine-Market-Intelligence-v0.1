@@ -20,7 +20,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
-CATALOG_PARSER_BUILD = "v0.3.26"
+CATALOG_PARSER_BUILD = "v0.3.27"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
@@ -422,13 +422,18 @@ def _canonical_grape_name(value: str) -> str:
 
 
 def _normalize_varietal_aliases(value: str) -> str:
-    """Normalize common provider spelling/label aliases without inventing grapes."""
+    """Normalize common provider spelling/label aliases without inventing grapes.
+
+    Canonical single-varietal values should describe the grape, not production
+    qualifiers already stored elsewhere.  For example, ``100% Estate Cabernet
+    Sauvignon`` becomes ``Cabernet Sauvignon`` while blend percentages are kept.
+    """
     text = _clean_name(value)
     if not text:
         return ""
     if _ascii_key(text) in {"gsm", "g s m"}:
         return "Grenache, Syrah, Mourvèdre"
-    # Preserve percentages while normalizing the grape phrase following them.
+    # Preserve blend percentages while normalizing the grape phrase following them.
     pieces = re.split(r"\s*(?:,|/|\+|\band\b)\s*", text, flags=re.I)
     normalized: list[str] = []
     for piece in pieces:
@@ -437,8 +442,26 @@ def _normalize_varietal_aliases(value: str) -> str:
             continue
         m = re.match(r"^(\d{1,3}%\s*)?(.*)$", piece)
         pct, grape = (m.group(1) or ""), (m.group(2) or "").strip()
+        # Estate is a separate canonical field; do not embed it in varietal.
+        grape = re.sub(r"^estate(?:[- ]grown)?\s+", "", grape, flags=re.I).strip()
         canonical = _canonical_grape_name(grape)
         normalized.append(f"{pct}{canonical}".strip())
+
+    if len(normalized) == 1:
+        single = normalized[0]
+        m = re.match(r"^100%\s+(.+)$", single, flags=re.I)
+        if m:
+            grape = m.group(1).strip()
+            known_single_grapes = {
+                "cabernet sauvignon", "cabernet franc", "chardonnay", "pinot noir",
+                "merlot", "sauvignon blanc", "syrah", "grenache", "zinfandel",
+                "petite sirah", "viognier", "riesling", "barbera", "sangiovese",
+                "tempranillo", "vermentino", "muscat canelli", "malbec",
+                "petit verdot", "tannat", "grenache blanc", "albariño",
+                "mourvèdre", "sémillon", "roussanne", "marsanne", "picpoul blanc",
+            }
+            if _ascii_key(grape) in {_ascii_key(g) for g in known_single_grapes}:
+                return grape
     return ", ".join(normalized) if normalized else text
 
 
@@ -906,8 +929,18 @@ def _finalize_catalog_offer(offer: WineOffer, provider_id: str = "") -> WineOffe
     offer.general_category = _infer_general_category(offer.graph_category, offer.varietal, offer.wine)
     offer.region, offer.subregion = _normalize_offer_geography(offer.region, offer.subregion)
 
-    if "reserve" in _ascii_key(offer.wine):
+    title_has_reserve = bool(re.search(r"\breserve\b", offer.wine or "", re.I))
+    evidence_has_reserve = bool(re.search(r"\breserve\b", offer.evidence or "", re.I))
+    if title_has_reserve:
         offer.product_tier = "Reserve"
+    elif str(offer.product_tier or "").casefold() == "reserve" and not evidence_has_reserve:
+        # Repair older/adapter-level substring false positives (e.g. preserve/preserves).
+        if offer.estate:
+            offer.product_tier = "Estate"
+        elif isinstance(offer.cases_produced, (int, float)) and not isinstance(offer.cases_produced, bool) and offer.cases_produced <= 250:
+            offer.product_tier = "Limited"
+        else:
+            offer.product_tier = "Core"
     offer.product_tier = offer.product_tier or "Core"
 
     has_price = any(x is not None for x in (offer.regular_price, offer.sale_price, offer.club_price))
@@ -2209,10 +2242,13 @@ def _infer_general_category(graph: str, varietal: str, title: str) -> str:
 
 
 def _infer_tier(title: str, text: str, estate: bool, cases: int | None) -> str:
-    blob = f"{title} {text[:1600]}".casefold()
-    if any(k in blob for k in ["flagship", "icon wine", "iconic", "benchmark"]):
+    blob = f"{title} {text[:1600]}"
+    blob_cf = blob.casefold()
+    if any(k in blob_cf for k in ["flagship", "icon wine", "iconic", "benchmark"]):
         return "Flagship"
-    if "reserve" in blob:
+    # Whole-word matching prevents ordinary prose such as "preserve" or
+    # "preserves" from being misread as the Reserve product tier.
+    if re.search(r"\breserve\b", blob, re.I):
         return "Reserve"
     if estate:
         return "Estate"

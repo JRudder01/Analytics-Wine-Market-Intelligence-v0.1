@@ -1,19 +1,20 @@
-# Wine Market Intelligence v0.3.26 — Catalog Quality Cleanup
+# Rudder Analytics Wine Market Intelligence v0.3.27
 
-This patch is a generic catalog-pipeline cleanup following the Eberle cross-platform test. It does **not** add an Eberle-specific parser.
+Small normalization cleanup following the Eberle regression test.
 
-## What changed
-
-- **Selected-product isolation:** once the user explicitly scans product pages, the review table contains only those selected/enriched products (plus any earlier selected pages in the same session), not every catalog-level candidate.
-- **Comparable-product gate:** obvious navigation/merchandise rows such as gift sets, `Club Only`, and `Winery Only` are excluded from review/staging.
-- **Bottle-size protection:** non-standard bottle-size variants such as 375 mL/half bottles and magnums are excluded from the standard 750 mL comparable pipeline until bottle-size normalization is implemented.
-- **Technical-field boundaries:** varietal/composition extraction stops before the next metadata label, preventing strings such as `Appellation Paso Robles` from being appended to a grape composition.
-- **Conservative availability:** contradictory static HTML states (for example `Sold Out` + `Back Ordered` + `Add to Cart`) now return blank rather than a false availability status.
-- **Universal cleanup:** the same candidate gate and field cleanup apply to all catalog adapters through the existing canonical finalizer.
-- Catalog parser build label updated to **v0.3.26**.
+## Changes
+- Reserve tier detection now requires the whole word `Reserve`, preventing prose such as `preserve` or `preserves` from creating false Reserve classifications.
+- The universal finalizer repairs stale false-positive Reserve rows before review/staging.
+- Canonical single-varietal values now remove `100%` and `Estate` qualifiers (for example, `100% Estate Cabernet Sauvignon` becomes `Cabernet Sauvignon`).
+- Blend percentages are preserved because they carry useful composition information.
+- App and catalog parser build labels updated to v0.3.27.
 
 ## Validation
-
-- Full catalog regression suite: **30/30 passing**.
+- 33/33 catalog enrichment regression tests pass.
 - `app.py` and `catalog_scraper.py` compile successfully.
-- Existing A&D and VinoShipper normalization paths remain covered by the regression suite.
+- Replayed against the latest five-row Eberle export:
+  - Côtes du Rôbles Rouge -> Core
+  - Estate Cabernet Sauvignon -> Cabernet Sauvignon / Estate
+  - Reserve Chardonnay -> Chardonnay / Reserve
+  - Steinbeck Syrah -> Syrah / Core
+  - Vineyard Selection Cabernet -> Cabernet Sauvignon / Core
