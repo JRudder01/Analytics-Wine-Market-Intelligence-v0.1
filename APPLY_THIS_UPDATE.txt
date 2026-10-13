@@ -1,0 +1,7 @@
+Wine Market Intelligence v0.4.2 dependency hotfix
+
+Replace the repository root requirements.txt with the included requirements.txt.
+packages.txt is included only for verification; it should remain at the repository root and contain: chromium
+
+No application/parser code changes are included in this patch.
+After committing the files, allow Streamlit Cloud to rebuild/reboot, then rerun the Sanger static scan and test the manual JavaScript-rendered fallback.
