@@ -88,7 +88,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.3</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.4</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -122,7 +122,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.3 uses the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.4 keeps the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan with a more streamlined admin workflow.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -421,26 +421,6 @@ elif page == "Data Hub (Admin)":
         "The catalog page is used to discover product links; individual product pages are fetched only after you explicitly select them. "
         "Known commerce providers can use documented product feeds when available; otherwise the catalog page is parsed normally and individual product pages are fetched only after explicit selection. On selected product pages, AI can act as a conservative interpretation fallback when structured/deterministic extraction is incomplete or noisy. Extracted rows remain subject to human review before staging."
     )
-    with st.expander("Safeguards / request behavior"):
-        st.markdown(
-            f"""
-- **User-Agent:** `{CATALOG_USER_AGENT}`
-- **Initial scope:** only the exact catalog/shop page you paste is fetched unless a recognized provider offers a documented product feed
-- **VinoShipper:** recognized shop URLs can use VinoShipper's documented Product Feed API; this avoids browser automation and can replace many individual product-page requests
-- **Product links:** discovered from already-fetched catalog HTML; they are **not opened automatically**
-- **Selected pages only:** product pages are fetched only after you explicitly select them
-- **Modern-site-first extraction:** provider feeds and structured product data remain the highest-authority sources; AI is a fallback/enrichment layer
-- **AI request behavior:** AI receives only bounded evidence already downloaded by the scanner and does **not** make an additional request to the winery site
-- **Request pacing:** selected pages are fetched sequentially with a short delay; maximum 12 pages per batch
-- **robots.txt:** checked before fetching; the result is cached in-process for 24 hours
-- **Access controls / rate limits:** HTTP 401, 403, or 429 is not bypassed and is not automatically retried
-- **Page size:** maximum 2 MB of HTML per fetched page
-- **JavaScript fallback:** manual only; no clicks, login, CAPTCHA handling, access-control bypass, or stealth/fingerprint spoofing
-- **Database:** nothing is written permanently until you review, stage, and use the normal GitHub batch commit
-
-The goal is minimal request volume and explicit human control rather than site-wide crawling.
-"""
-        )
 
     if "catalog_scan_nonce" not in st.session_state:
         st.session_state.catalog_scan_nonce = 0
@@ -495,29 +475,52 @@ The goal is minimal request volume and explicit human control rather than site-w
         ).strip()
         st.caption("VinoShipper detected · documented Product Feed preferred automatically.")
 
-    with st.expander("Scan settings (optional)"):
-        source_status = st.selectbox(
-            "Source status",
-            ["Testing / permission pending", "Approved for low-frequency scan", "Do not scan"],
-            index=0,
-            key=f"catalog_source_status_{catalog_nonce}",
-            help="Internal workflow flag. 'Do not scan' disables network requests for this source.",
+    with st.expander("Options & safeguards (optional)"):
+        set1, set2 = st.columns(2)
+        with set1:
+            source_status = st.selectbox(
+                "Source status",
+                ["Testing / permission pending", "Approved for low-frequency scan", "Do not scan"],
+                index=0,
+                key=f"catalog_source_status_{catalog_nonce}",
+                help="Internal workflow flag. 'Do not scan' disables network requests for this source.",
+            )
+        with set2:
+            ai_mode_label = st.selectbox(
+                "Product-page interpretation",
+                [
+                    "AI fallback (recommended)",
+                    "Deterministic only",
+                    "AI on every selected product page (testing)",
+                ],
+                index=0 if ai_ready else 1,
+                key=f"catalog_ai_mode_{catalog_nonce}",
+                help=(
+                    "The recommended mode keeps provider/structured facts authoritative and uses AI only when selected "
+                    "product-page evidence is incomplete or noisy. AI does not browse the winery site independently."
+                ),
+            )
+
+        st.markdown("**Request safeguards**")
+        st.caption(
+            "Exact catalog page first · product links are not opened automatically · selected product pages only · "
+            "robots.txt checked · 12-page batch limit · 2 MB/page cap · 401/403/429 are not bypassed. "
+            "JavaScript rendering is manual only and does not click, log in, solve challenges, or use stealth/proxy bypasses."
         )
-        ai_mode_label = st.selectbox(
-            "Product-page interpretation",
-            [
-                "AI fallback (recommended)",
-                "Deterministic only",
-                "AI on every selected product page (testing)",
-            ],
-            index=0 if ai_ready else 1,
-            key=f"catalog_ai_mode_{catalog_nonce}",
-            help=(
-                "The recommended mode keeps provider/structured facts authoritative and uses AI only when selected "
-                "product-page evidence is incomplete or noisy. AI does not browse the winery site independently."
-            ),
-        )
-        st.caption(f"Catalog parser: {CATALOG_PARSER_BUILD}")
+        with st.expander("Technical request details", expanded=False):
+            st.markdown(
+                f"""
+- **User-Agent:** `{CATALOG_USER_AGENT}`
+- **Provider priority:** documented provider feeds and structured product data remain higher authority than AI interpretation
+- **AI behavior:** AI receives bounded evidence already downloaded by the scanner and does **not** independently browse the winery site
+- **Request pacing:** selected product pages are fetched sequentially with a short delay
+- **robots.txt:** checked before fetching and cached in-process for 24 hours
+- **Rendered fallback:** explicit/manual only; no automatic product-page clicks, login automation, CAPTCHA solving, fingerprint spoofing, rotating proxies, or access-control bypass
+- **Persistence:** nothing is written permanently until review/staging and the normal GitHub batch commit
+
+Catalog parser: `{CATALOG_PARSER_BUILD}`
+"""
+            )
 
     ai_mode = {
         "AI fallback (recommended)": "auto",
@@ -532,9 +535,21 @@ The goal is minimal request volume and explicit human control rather than site-w
     elif not ai_ready:
         st.caption("AI interpretation unavailable · deterministic/provider scanning will be used.")
     else:
-        st.caption(f"Ready to scan · AI fallback enabled · {get_catalog_ai_model()}")
+        st.caption("Ready to scan · AI fallback enabled")
 
-    scan_col, clear_col = st.columns([3, 1])
+    has_catalog_state = any(
+        st.session_state.get(key)
+        for key in [
+            "catalog_fetch", "catalog_offers", "catalog_product_links",
+            "catalog_product_scan_summary", "catalog_selected_offers", "catalog_rendered_used",
+        ]
+    )
+    if has_catalog_state:
+        scan_col, clear_col = st.columns([3, 1])
+    else:
+        scan_col = st.container()
+        clear_col = None
+
     with scan_col:
         catalog_scan_clicked = st.button(
             "Scan this catalog page",
@@ -543,12 +558,15 @@ The goal is minimal request volume and explicit human control rather than site-w
             disabled=source_status == "Do not scan",
             key=f"catalog_scan_btn_{catalog_nonce}",
         )
-    with clear_col:
-        catalog_clear_clicked = st.button(
-            "Clear catalog scan",
-            use_container_width=True,
-            key=f"catalog_clear_btn_{catalog_nonce}",
-        )
+
+    catalog_clear_clicked = False
+    if clear_col is not None:
+        with clear_col:
+            catalog_clear_clicked = st.button(
+                "Clear catalog scan",
+                use_container_width=True,
+                key=f"catalog_clear_btn_{catalog_nonce}",
+            )
 
     if catalog_clear_clicked:
         for key in [
@@ -991,79 +1009,86 @@ The goal is minimal request volume and explicit human control rather than site-w
     if "vision_last_paste_hash" not in st.session_state:
         st.session_state.vision_last_paste_hash = ""
 
-    ss1, ss2 = st.columns([1.25, 1])
-    with ss1:
-        shot_files = st.file_uploader(
-            "Wine product screenshots (1–4)",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=True,
-            key=f"vision_shots_{vision_nonce}",
-            help="Use screenshots from one wine/product page at a time. Include price/spec sections when possible.",
-        )
+    st.markdown("**1. Add screenshots**")
+    shot_files = st.file_uploader(
+        "Wine product screenshots (1–4)",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key=f"vision_shots_{vision_nonce}",
+        help="Use screenshots from one wine/product page at a time. Include price/spec sections when possible.",
+        label_visibility="collapsed",
+    )
 
-        st.caption("Or copy a screenshot to your clipboard and add it directly.")
-        if paste_image_button is not None:
-            pasted = paste_image_button(
-                label="📋 Paste screenshot from clipboard",
-                text_color="#ffffff",
-                background_color="#285873",
-                hover_background_color="#1f465d",
-                key=f"vision_clipboard_paste_{vision_nonce}",
-                errors="raise",
+    st.caption("Upload files above, or paste a screenshot directly from your clipboard.")
+    if paste_image_button is not None:
+        pasted = paste_image_button(
+            label="📋 Paste screenshot from clipboard",
+            text_color="#ffffff",
+            background_color="#285873",
+            hover_background_color="#1f465d",
+            key=f"vision_clipboard_paste_{vision_nonce}",
+            errors="raise",
+        )
+        if pasted.image_data is not None:
+            buffer = io.BytesIO()
+            pasted.image_data.save(buffer, format="PNG")
+            pasted_bytes = buffer.getvalue()
+            paste_hash = hashlib.sha256(pasted_bytes).hexdigest()
+            existing_count = len(shot_files or []) + len(st.session_state.vision_pasted_images)
+            if paste_hash != st.session_state.vision_last_paste_hash:
+                if existing_count >= 4:
+                    st.warning("A maximum of four screenshots can be used for one wine. Clear one before pasting another.")
+                else:
+                    st.session_state.vision_pasted_images.append({
+                        "name": f"Clipboard screenshot {len(st.session_state.vision_pasted_images) + 1}",
+                        "bytes": pasted_bytes,
+                        "hash": paste_hash,
+                    })
+                    st.session_state.vision_last_paste_hash = paste_hash
+    else:
+        st.info("Clipboard paste is unavailable until the streamlit-paste-button dependency is installed. File upload still works normally.")
+
+    if st.session_state.vision_pasted_images:
+        with st.expander(f"Clipboard screenshots ({len(st.session_state.vision_pasted_images)})", expanded=False):
+            preview_cols = st.columns(min(4, len(st.session_state.vision_pasted_images)))
+            for idx, item in enumerate(st.session_state.vision_pasted_images):
+                with preview_cols[idx % len(preview_cols)]:
+                    st.image(item["bytes"], caption=item["name"], use_container_width=True)
+
+    st.markdown("**2. Identify the source**")
+    vision_source_url = st.text_input(
+        "Source URL (optional)",
+        key=f"vision_source_url_{vision_nonce}",
+        placeholder="https://winery.example/product/...",
+        help="Recommended for auditability. The tool does not fetch this URL during screenshot extraction.",
+    )
+
+    model_options = ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"]
+    default_model = get_default_model()
+    model_idx = model_options.index(default_model) if default_model in model_options else 0
+    with st.expander("Source details & AI settings (optional)"):
+        opt1, opt2 = st.columns(2)
+        with opt1:
+            vision_source_kind = st.selectbox(
+                "Source type",
+                ["Official winery site", "Retailer / merchant", "Other public source"],
+                key=f"vision_source_kind_{vision_nonce}",
             )
-            if pasted.image_data is not None:
-                buffer = io.BytesIO()
-                pasted.image_data.save(buffer, format="PNG")
-                pasted_bytes = buffer.getvalue()
-                paste_hash = hashlib.sha256(pasted_bytes).hexdigest()
-                existing_count = len(shot_files or []) + len(st.session_state.vision_pasted_images)
-                if paste_hash != st.session_state.vision_last_paste_hash:
-                    if existing_count >= 4:
-                        st.warning("A maximum of four screenshots can be used for one wine. Clear one before pasting another.")
-                    else:
-                        st.session_state.vision_pasted_images.append({
-                            "name": f"Clipboard screenshot {len(st.session_state.vision_pasted_images) + 1}",
-                            "bytes": pasted_bytes,
-                            "hash": paste_hash,
-                        })
-                        st.session_state.vision_last_paste_hash = paste_hash
-        else:
-            st.info("Clipboard paste is unavailable until the streamlit-paste-button dependency is installed. File upload still works normally.")
-
-        if st.session_state.vision_pasted_images:
-            with st.expander(f"Clipboard screenshots ({len(st.session_state.vision_pasted_images)})", expanded=True):
-                preview_cols = st.columns(min(4, len(st.session_state.vision_pasted_images)))
-                for idx, item in enumerate(st.session_state.vision_pasted_images):
-                    with preview_cols[idx % len(preview_cols)]:
-                        st.image(item["bytes"], caption=item["name"], use_container_width=True)
-
-        vision_source_url = st.text_input(
-            "Source URL",
-            key=f"vision_source_url_{vision_nonce}",
-            placeholder="https://winery.example/product/...",
-            help="Stored for auditability; the tool does not fetch this URL during screenshot extraction.",
-        )
-    with ss2:
-        vision_source_kind = st.selectbox(
-            "Source type",
-            ["Official winery site", "Retailer / merchant", "Other public source"],
-            key=f"vision_source_kind_{vision_nonce}",
-        )
-        vision_source_name = st.text_input(
-            "Source name override (optional)",
-            key=f"vision_source_name_{vision_nonce}",
-            placeholder="Eberle Winery",
-        )
-        model_options = ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"]
-        default_model = get_default_model()
-        model_idx = model_options.index(default_model) if default_model in model_options else 0
-        vision_model = st.selectbox(
-            "Vision model",
-            model_options,
-            index=model_idx,
-            key="vision_model",
-            help="Terra is the default balance of extraction quality and cost. Luna is cheaper; Sol is more capable but more expensive.",
-        )
+            vision_source_name = st.text_input(
+                "Source name override",
+                key=f"vision_source_name_{vision_nonce}",
+                placeholder="Usually leave blank",
+                help="Use only when the displayed/source name should differ from the extracted winery name.",
+            )
+        with opt2:
+            vision_model = st.selectbox(
+                "Vision model",
+                model_options,
+                index=model_idx,
+                key="vision_model",
+                help="Terra is the default balance of extraction quality and cost. Luna is cheaper; Sol is more capable but more expensive.",
+            )
+            st.caption("Default workflow: Official winery site + configured default Vision model.")
 
     combined_shots = list(shot_files or []) + [item["bytes"] for item in st.session_state.vision_pasted_images]
     if combined_shots or st.session_state.get("vision_extraction"):
@@ -1077,6 +1102,7 @@ The goal is minimal request volume and explicit human control rather than site-w
     if too_many_shots:
         st.warning("Use no more than four screenshots for one wine. Remove an uploaded file or clear a clipboard screenshot before extracting.")
 
+    st.markdown("**3. Extract & review**")
     extract_clicked = st.button(
         "Extract wine details with AI",
         type="primary",
@@ -1407,7 +1433,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.4.3 approach
+### v0.4.4 approach
 
 The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
@@ -1427,6 +1453,6 @@ The model is a market-positioning aid, not a guarantee of demand or sell-through
 
 **Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by an administrator. The AI extracts visible facts only; deterministic classification rules are applied afterward; a human must review/edit the proposed row before it is added to the session comp database.
 
-**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. v0.4.x adds an AI interpretation fallback for selected product pages: strong provider/structured facts remain authoritative, while AI can interpret already-downloaded legacy/noisy HTML and must return field-level evidence. AI does not make an additional winery-site request. v0.4.2 added an explicit rendered-page fallback for JavaScript storefronts only after the static path fails; it is manual, does not click/login/bypass challenges, and the rendered DOM re-enters the same canonical pipeline. v0.4.3 streamlines the catalog-scan UI with progressive disclosure while preserving the same request behavior and extraction logic. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
+**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. v0.4.x adds an AI interpretation fallback for selected product pages: strong provider/structured facts remain authoritative, while AI can interpret already-downloaded legacy/noisy HTML and must return field-level evidence. AI does not make an additional winery-site request. v0.4.2 added an explicit rendered-page fallback for JavaScript storefronts only after the static path fails; it is manual, does not click/login/bypass challenges, and the rendered DOM re-enters the same canonical pipeline. v0.4.3 streamlined the catalog-scan UI with progressive disclosure. v0.4.4 consolidates optional scan controls/safeguards, hides reset actions until they are relevant, and applies the same progressive-disclosure pattern to Screenshot Intake without changing extraction logic. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
         """
     )
