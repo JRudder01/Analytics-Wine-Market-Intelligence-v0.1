@@ -18,6 +18,9 @@ jobs:
         with:
           ref: main
 
+      - name: Install test dependencies
+        run: python -m pip install -q beautifulsoup4 requests pytest
+
       - name: Apply generic BeautifulSoup safety fix and version bump
         run: |
           python - <<'PY'
