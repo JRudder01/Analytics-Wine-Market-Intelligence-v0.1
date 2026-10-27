@@ -3136,7 +3136,7 @@ def scan_selected_product_pages(
     urls: list[str],
     *,
     delay_seconds: float = 0.9,
-    max_pages: int = 12,
+    max_pages: int = 30,
     ai_mode: str = "off",
     producer_hint: str = "",
     ai_model: str | None = None,

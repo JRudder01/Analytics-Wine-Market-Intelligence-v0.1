@@ -504,7 +504,7 @@ elif page == "Data Hub (Admin)":
         st.markdown("**Request safeguards**")
         st.caption(
             "Exact catalog page first · product links are not opened automatically · selected product pages only · "
-            "robots.txt checked · 12-page batch limit · 2 MB/page cap · 401/403/429 are not bypassed. "
+            "robots.txt checked · 30-page batch limit · 2 MB/page cap · 401/403/429 are not bypassed. "
             "JavaScript rendering is manual only and does not click, log in, solve challenges, or use stealth/proxy bypasses."
         )
         with st.expander("Technical request details", expanded=False):
@@ -679,7 +679,7 @@ Catalog parser: `{CATALOG_PARSER_BUILD}`
         )
         selected_urls = product_editor.loc[product_editor["scan"].fillna(False), "url"].astype(str).tolist()
         selected_count = len(selected_urls)
-        st.caption(f"{selected_count} selected · maximum 12 per batch")
+        st.caption(f"{selected_count} selected · maximum 30 per batch")
         allow_product_render = False
         with st.expander("Product-page scan options"):
             allow_product_render = st.checkbox(
