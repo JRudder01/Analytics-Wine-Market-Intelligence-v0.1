@@ -31,7 +31,7 @@ jobs:
           old = '''    for tag in list(clone.find_all(True)):\n        role = str(tag.get("role") or "").casefold()\n'''
           new = '''    for tag in list(clone.find_all(True)):\n        # Decomposing a parent invalidates descendant Tag.attrs in BeautifulSoup.\n        # The prebuilt list can still contain those descendants, so skip them safely.\n        if getattr(tag, "attrs", None) is None:\n            continue\n        role = str(tag.get("role") or "").casefold()\n'''
           if old not in text:
-              raise SystemExit('Expected _product_local_text loop not found')
+              raise SystemExit('Expected _clean_product_node_text loop not found')
           text = text.replace(old, new, 1)
           if 'CATALOG_PARSER_BUILD = "v0.4.2"' not in text:
               raise SystemExit('Expected parser build marker not found')
@@ -69,7 +69,7 @@ jobs:
           </section>
           '''
           soup = BeautifulSoup(html, 'html.parser')
-          text = cs._product_local_text(soup.find('section'))
+          text = cs._clean_product_node_text(soup.find('section'))
           assert 'Estate Syrah' in text
           assert 'Related wine shell' not in text
           PY
