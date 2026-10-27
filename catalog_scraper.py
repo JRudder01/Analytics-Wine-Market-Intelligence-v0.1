@@ -21,7 +21,7 @@ USER_AGENT = (
     "WineCatalogResearch/0.1 "
     "(user-initiated single-page request)"
 )
-CATALOG_PARSER_BUILD = "v0.4.2"
+CATALOG_PARSER_BUILD = "v0.4.3"
 MAX_HTML_BYTES = 2_000_000
 REQUEST_TIMEOUT = (5, 12)
 ROBOTS_TTL_SECONDS = 24 * 60 * 60
@@ -2687,6 +2687,10 @@ def _clean_product_node_text(node: Tag | BeautifulSoup) -> str:
     for tag in clone.find_all(["script", "style", "noscript", "svg", "nav", "header", "footer"]):
         tag.decompose()
     for tag in list(clone.find_all(True)):
+        # Decomposing a parent invalidates descendant Tag.attrs in BeautifulSoup.
+        # The prebuilt list can still contain those descendants, so skip them safely.
+        if getattr(tag, "attrs", None) is None:
+            continue
         role = str(tag.get("role") or "").casefold()
         marker = " ".join([
             str(tag.get("id") or ""),
