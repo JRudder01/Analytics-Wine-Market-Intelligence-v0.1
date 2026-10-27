@@ -88,7 +88,7 @@ with header_left:
     st.image(str(ASSETS / "rudder_wordmark.png"), width=265)
 with header_right:
     st.title("Wine Market Intelligence")
-    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.4</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ra-subtitle">Pricing, comparable-market & AI-assisted data intake · v0.4.5</div>', unsafe_allow_html=True)
 
 seed = load_comps()
 context = load_public_context()
@@ -122,7 +122,7 @@ def _reset_vision_intake():
 
 if page == "Pricing Analysis":
     st.subheader("1. Identify the wine")
-    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.4 keeps the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan with a more streamlined admin workflow.")
+    st.caption("Start with a known comparable or enter a new/unreleased wine. v0.4.5 keeps the expanded Paso workbook, public market context, AI-assisted comp intake, batched GitHub persistence, deterministic category/color matching, normalized comp identities, a single accent-insensitive known-wine autocomplete, reset-safe screenshot intake, and an experimental low-request catalog/product-page scan with a streamlined admin workflow.")
 
     known = st.toggle("Start from a known wine", value=True)
     defaults = {}
@@ -1010,43 +1010,48 @@ Catalog parser: `{CATALOG_PARSER_BUILD}`
         st.session_state.vision_last_paste_hash = ""
 
     st.markdown("**1. Add screenshots**")
-    shot_files = st.file_uploader(
-        "Wine product screenshots (1–4)",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,
-        key=f"vision_shots_{vision_nonce}",
-        help="Use screenshots from one wine/product page at a time. Include price/spec sections when possible.",
-        label_visibility="collapsed",
-    )
-
-    st.caption("Upload files above, or paste a screenshot directly from your clipboard.")
-    if paste_image_button is not None:
-        pasted = paste_image_button(
-            label="📋 Paste screenshot from clipboard",
-            text_color="#ffffff",
-            background_color="#285873",
-            hover_background_color="#1f465d",
-            key=f"vision_clipboard_paste_{vision_nonce}",
-            errors="raise",
+    st.caption("Choose either method below. Use up to four screenshots from one wine/product page at a time.")
+    intake_upload_col, intake_paste_col = st.columns(2, gap="large")
+    with intake_upload_col:
+        st.caption("**Upload files**")
+        shot_files = st.file_uploader(
+            "Wine product screenshots (1–4)",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            key=f"vision_shots_{vision_nonce}",
+            help="Use screenshots from one wine/product page at a time. Include price/spec sections when possible.",
+            label_visibility="collapsed",
         )
-        if pasted.image_data is not None:
-            buffer = io.BytesIO()
-            pasted.image_data.save(buffer, format="PNG")
-            pasted_bytes = buffer.getvalue()
-            paste_hash = hashlib.sha256(pasted_bytes).hexdigest()
-            existing_count = len(shot_files or []) + len(st.session_state.vision_pasted_images)
-            if paste_hash != st.session_state.vision_last_paste_hash:
-                if existing_count >= 4:
-                    st.warning("A maximum of four screenshots can be used for one wine. Clear one before pasting another.")
-                else:
-                    st.session_state.vision_pasted_images.append({
-                        "name": f"Clipboard screenshot {len(st.session_state.vision_pasted_images) + 1}",
-                        "bytes": pasted_bytes,
-                        "hash": paste_hash,
-                    })
-                    st.session_state.vision_last_paste_hash = paste_hash
-    else:
-        st.info("Clipboard paste is unavailable until the streamlit-paste-button dependency is installed. File upload still works normally.")
+    with intake_paste_col:
+        st.caption("**Paste from clipboard**")
+        if paste_image_button is not None:
+            pasted = paste_image_button(
+                label="📋 Paste screenshot",
+                text_color="#ffffff",
+                background_color="#4f6b7a",
+                hover_background_color="#405966",
+                key=f"vision_clipboard_paste_{vision_nonce}",
+                errors="raise",
+            )
+            st.caption("Useful when you already have a screenshot copied.")
+            if pasted.image_data is not None:
+                buffer = io.BytesIO()
+                pasted.image_data.save(buffer, format="PNG")
+                pasted_bytes = buffer.getvalue()
+                paste_hash = hashlib.sha256(pasted_bytes).hexdigest()
+                existing_count = len(shot_files or []) + len(st.session_state.vision_pasted_images)
+                if paste_hash != st.session_state.vision_last_paste_hash:
+                    if existing_count >= 4:
+                        st.warning("A maximum of four screenshots can be used for one wine. Clear one before pasting another.")
+                    else:
+                        st.session_state.vision_pasted_images.append({
+                            "name": f"Clipboard screenshot {len(st.session_state.vision_pasted_images) + 1}",
+                            "bytes": pasted_bytes,
+                            "hash": paste_hash,
+                        })
+                        st.session_state.vision_last_paste_hash = paste_hash
+        else:
+            st.info("Clipboard paste is unavailable until the streamlit-paste-button dependency is installed. File upload still works normally.")
 
     if st.session_state.vision_pasted_images:
         with st.expander(f"Clipboard screenshots ({len(st.session_state.vision_pasted_images)})", expanded=False):
@@ -1062,6 +1067,7 @@ Catalog parser: `{CATALOG_PARSER_BUILD}`
         placeholder="https://winery.example/product/...",
         help="Recommended for auditability. The tool does not fetch this URL during screenshot extraction.",
     )
+    st.caption("Use when known; it preserves provenance without causing the app to fetch the page.")
 
     model_options = ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"]
     default_model = get_default_model()
@@ -1275,124 +1281,156 @@ Catalog parser: `{CATALOG_PARSER_BUILD}`
                     else:
                         success_message = "New comparable added to this session."
                     st.session_state["vision_flash_success"] = success_message
-                    st.session_state["vision_flash_info"] = "Screenshot intake cleared automatically. This observation is staged in the current session; use **Commit pending changes to GitHub database** when you are ready to save the batch permanently."
+                    st.session_state["vision_flash_info"] = "Screenshot intake cleared automatically. This observation is now in the pending batch; review and save that batch in the **Comparable database** section when you are ready."
                     _reset_vision_intake()
                     st.rerun()
 
-    st.warning("Approved/manual comps are staged in this Streamlit session until you commit the batch to GitHub. You can enter multiple wines first, then save them together in one database commit.")
-
-    st.markdown("### Comp database")
-    source_counts = all_data.groupby(["source_name", "data_confidence"], dropna=False).size().reset_index(name="Observations")
-    st.dataframe(source_counts.rename(columns={"source_name": "Source", "data_confidence": "Confidence"}), use_container_width=True, hide_index=True)
-
-    st.markdown("#### Import a newer pricing workbook")
-    wb_upload = st.file_uploader("Paso pricing workbook", type=["xlsx", "xls"], key="rudder_wb")
-    if wb_upload is not None:
-        try:
-            imported = load_rudder_pricing_workbook(wb_upload)
-            st.success(f"Normalized {len(imported)} priced wine observations from the workbook's Data sheet.")
-            st.dataframe(imported.head(20), use_container_width=True, hide_index=True)
-            if st.button("Use this workbook for this session"):
-                st.session_state.uploaded_comps = imported
-                st.rerun()
-        except Exception as exc:
-            st.error(f"Workbook import failed: {exc}")
-
-    st.markdown("#### Add a manually researched comparable")
-    with st.form("manual_comp"):
-        x1, x2, x3, x4 = st.columns(4)
-        m_winery = x1.text_input("Winery")
-        m_wine = x2.text_input("Wine")
-        m_vintage = x3.number_input("Vintage", min_value=1990, max_value=2035, value=2024)
-        m_price = x4.number_input("Price", min_value=0.0, value=0.0, step=1.0)
-        x1, x2, x3, x4 = st.columns(4)
-        m_varietal = x1.text_input("Varietal / blend")
-        m_category = x2.text_input("Market category", value="Cabernet Sauvignon")
-        m_region = x3.text_input("AVA / region", value="Paso Robles")
-        m_tier = x4.selectbox("Tier", ["Value/Core", "Core", "Estate", "Limited", "Reserve", "Flagship"], index=1)
-        m_source = st.text_input("Source URL (recommended)")
-        m_price_type = st.selectbox("Price type", ["Winery MSRP", "Winery retail", "Observed retail", "Historical listed price"])
-        submitted = st.form_submit_button("Add comparable to this session")
-    if submitted:
-        if not m_winery or not m_wine or m_price <= 0:
-            st.error("Winery, wine and a positive price are required.")
-        else:
-            general = "White" if any(k in m_category.lower() for k in ["chardonnay", "viognier", "sauvignon blanc", "white"]) else "Red"
-            new = pd.DataFrame([{
-                "winery": m_winery, "wine": m_wine, "vintage": m_vintage, "varietal": m_varietal,
-                "graph_category": m_category, "general_category": general, "region": m_region, "subregion": "",
-                "price": m_price, "price_type": m_price_type, "critic": "", "critic_score": np.nan,
-                "cases_produced": np.nan, "alcohol_pct": np.nan, "estate": m_tier == "Estate",
-                "single_vineyard": False, "product_tier": m_tier, "source_name": "Manual research",
-                "source_url": m_source, "price_date": pd.Timestamp.today().date().isoformat(), "data_confidence": "Moderate",
-            }])
-            manual_check = classify_existing_observation(all_data, new.iloc[0].to_dict())
-            manual_status = manual_check.get("status")
-            if manual_status == "exact_duplicate":
-                st.error("Not added: an exact duplicate of this wine/vintage/price type/price already exists.")
-            else:
-                current = st.session_state.uploaded_comps
-                st.session_state.uploaded_comps = normalize_comp_data(pd.concat([current, new], ignore_index=True) if current is not None else new)
-                if manual_status == "price_update":
-                    latest = manual_check.get("latest") or {}
-                    st.success(f"Price update added for this session (${float(latest.get('price')):,.2f} → ${m_price:,.2f}); the older observation is retained for history.")
-                elif manual_status == "alternate_price_type":
-                    st.success("Alternate price type added for this session; existing observations were retained.")
-                else:
-                    st.success("Comparable added for this session.")
-                st.info("The observation is staged. Commit the pending batch to GitHub below when you are ready.")
-
-    st.markdown("### Persist staged comp changes")
+    st.markdown("### Comparable database")
     pending = st.session_state.uploaded_comps
     pending_count = 0 if pending is None else len(pending)
     configured, gh_status = github_storage_status()
+    source_counts = all_data.groupby(["source_name", "data_confidence"], dropna=False).size().reset_index(name="Observations")
+    source_total = int(all_data["source_name"].fillna("").replace("", np.nan).nunique()) if "source_name" in all_data.columns else 0
 
-    p1, p2, p3 = st.columns([1, 1, 2])
-    p1.metric("Pending observations", pending_count)
-    p2.metric("Permanent database", "GitHub" if configured else "Not configured")
-    with p3:
-        st.caption(gh_status)
+    st.caption(
+        f"{len(all_data):,} observations loaded · {source_total:,} source label{'s' if source_total != 1 else ''}"
+        + (f" · {pending_count:,} pending change{'s' if pending_count != 1 else ''}" if pending_count else " · no pending changes")
+    )
 
-    if pending_count == 0:
-        st.info("No staged comp changes are waiting to be saved.")
-    elif not configured:
-        st.warning("GitHub write-back is not configured yet. Add GITHUB_TOKEN and GITHUB_REPO to Streamlit Secrets before committing staged observations.")
-    else:
-        st.caption("This saves all staged observations in one commit. The app fetches the newest GitHub database immediately before merging, so recently committed rows are preserved.")
-        if st.button(f"Commit {pending_count} pending change{'s' if pending_count != 1 else ''} to GitHub database", type="primary", use_container_width=True):
-            with st.spinner("Fetching the current comp database and committing the staged batch..."):
-                try:
-                    save_result = commit_pending_comps(pending)
-                except GitHubStorageError as exc:
-                    st.error(f"GitHub save failed: {exc}")
-                except Exception as exc:
-                    st.error(f"Unexpected GitHub save error: {exc}")
+    with st.expander("Database source coverage", expanded=False):
+        st.dataframe(
+            source_counts.rename(columns={"source_name": "Source", "data_confidence": "Confidence"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("#### Add observations")
+    st.caption("Use the normal screenshot/catalog workflows above when possible. These controls cover workbook refreshes and one-off manual research.")
+
+    with st.expander("Import a newer pricing workbook", expanded=False):
+        wb_upload = st.file_uploader("Paso pricing workbook", type=["xlsx", "xls"], key="rudder_wb")
+        if wb_upload is not None:
+            try:
+                imported = load_rudder_pricing_workbook(wb_upload)
+                st.success(f"Normalized {len(imported)} priced wine observations from the workbook's Data sheet.")
+                st.dataframe(imported.head(20), use_container_width=True, hide_index=True)
+                st.caption("Using this workbook replaces the current session's staged comp set with the normalized workbook rows; nothing is permanent until you commit below.")
+                if st.button("Use this workbook for this session", key="use_pricing_workbook_session"):
+                    st.session_state.uploaded_comps = imported
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Workbook import failed: {exc}")
+
+    with st.expander("Add a manually researched comparable", expanded=False):
+        with st.form("manual_comp"):
+            x1, x2, x3, x4 = st.columns(4)
+            m_winery = x1.text_input("Winery")
+            m_wine = x2.text_input("Wine")
+            m_vintage = x3.number_input("Vintage", min_value=1990, max_value=2035, value=2024)
+            m_price = x4.number_input("Price", min_value=0.0, value=0.0, step=1.0)
+            x1, x2, x3, x4 = st.columns(4)
+            m_varietal = x1.text_input("Varietal / blend")
+            m_category = x2.text_input("Market category", value="Cabernet Sauvignon")
+            m_region = x3.text_input("AVA / region", value="Paso Robles")
+            m_tier = x4.selectbox("Tier", ["Value/Core", "Core", "Estate", "Limited", "Reserve", "Flagship"], index=1)
+            m_source = st.text_input("Source URL (recommended)")
+            m_price_type = st.selectbox("Price type", ["Winery MSRP", "Winery retail", "Observed retail", "Historical listed price"])
+            submitted = st.form_submit_button("Add comparable to pending batch")
+        if submitted:
+            if not m_winery or not m_wine or m_price <= 0:
+                st.error("Winery, wine and a positive price are required.")
+            else:
+                general = "White" if any(k in m_category.lower() for k in ["chardonnay", "viognier", "sauvignon blanc", "white"]) else "Red"
+                new = pd.DataFrame([{
+                    "winery": m_winery, "wine": m_wine, "vintage": m_vintage, "varietal": m_varietal,
+                    "graph_category": m_category, "general_category": general, "region": m_region, "subregion": "",
+                    "price": m_price, "price_type": m_price_type, "critic": "", "critic_score": np.nan,
+                    "cases_produced": np.nan, "alcohol_pct": np.nan, "estate": m_tier == "Estate",
+                    "single_vineyard": False, "product_tier": m_tier, "source_name": "Manual research",
+                    "source_url": m_source, "price_date": pd.Timestamp.today().date().isoformat(), "data_confidence": "Moderate",
+                }])
+                manual_check = classify_existing_observation(all_data, new.iloc[0].to_dict())
+                manual_status = manual_check.get("status")
+                if manual_status == "exact_duplicate":
+                    st.error("Not added: an exact duplicate of this wine/vintage/price type/price already exists.")
                 else:
-                    # Persist succeeded. Clear the local staging queue immediately so the
-                    # current browser session cannot accidentally re-commit the same batch.
-                    st.session_state.uploaded_comps = None
-                    _reset_vision_intake()
-                    st.session_state["github_flash_success"] = (
-                        f"Saved {save_result['staged_count']} staged observation(s) to "
-                        f"{save_result['repo']} on `{save_result['branch']}`. "
-                        f"Database rows: {save_result['remote_before']} → {save_result['remote_after']}. "
-                        "Local pending queue cleared."
-                    )
-                    if save_result.get("commit_url"):
-                        st.session_state["github_flash_info"] = (
-                            "The batch is permanently stored in GitHub. The app has cleared the local "
-                            "pending queue; opening the GitHub commit is optional. Wait for the GitHub-triggered "
-                            "Streamlit redeploy before starting a new batch so the committed database is loaded locally."
-                        )
+                    current = st.session_state.uploaded_comps
+                    st.session_state.uploaded_comps = normalize_comp_data(pd.concat([current, new], ignore_index=True) if current is not None else new)
+                    if manual_status == "price_update":
+                        latest = manual_check.get("latest") or {}
+                        st.success(f"Price update added to the pending batch (${float(latest.get('price')):,.2f} → ${m_price:,.2f}); the older observation is retained for history.")
+                    elif manual_status == "alternate_price_type":
+                        st.success("Alternate price type added to the pending batch; existing observations were retained.")
                     else:
-                        st.session_state["github_flash_info"] = (
-                            "The batch is permanently stored in GitHub and the local pending queue is cleared. "
-                            "Wait for the GitHub-triggered Streamlit redeploy before starting a new batch so the "
-                            "committed database is loaded locally."
+                        st.success("Comparable added to the pending batch.")
+                    st.info("Nothing has been written to GitHub yet. Review and save the pending batch below when ready.")
+
+    # Re-read pending state because the manual/workbook controls above may have changed it.
+    pending = st.session_state.uploaded_comps
+    pending_count = 0 if pending is None else len(pending)
+
+    st.markdown("#### Pending changes")
+    if pending_count == 0:
+        st.caption("No observations are waiting to be saved. Add or approve comps above to build a batch.")
+    else:
+        st.info(
+            f"{pending_count} observation{'s are' if pending_count != 1 else ' is'} staged in this browser session. "
+            "They remain temporary until the GitHub commit succeeds."
+        )
+        with st.expander(f"Review pending batch ({pending_count})", expanded=False):
+            preview_cols = [
+                c for c in ["winery", "wine", "vintage", "price", "price_type", "source_name", "data_confidence"]
+                if c in pending.columns
+            ]
+            pending_preview = pending[preview_cols].copy() if preview_cols else pending.copy()
+            st.dataframe(pending_preview.head(50), use_container_width=True, hide_index=True)
+            if len(pending_preview) > 50:
+                st.caption(f"Showing the first 50 of {len(pending_preview):,} pending observations.")
+
+        if not configured:
+            st.warning("GitHub write-back is not configured yet. Add GITHUB_TOKEN and GITHUB_REPO to Streamlit Secrets before saving this batch.")
+            st.caption(gh_status)
+        else:
+            st.caption("Save destination: GitHub · The newest remote database is fetched immediately before merge, so recently committed rows are preserved.")
+            if st.button(
+                f"Save {pending_count} pending change{'s' if pending_count != 1 else ''} to GitHub",
+                type="primary",
+                use_container_width=True,
+                key="commit_pending_comps_primary",
+            ):
+                with st.spinner("Fetching the current comp database and saving the pending batch..."):
+                    try:
+                        save_result = commit_pending_comps(pending)
+                    except GitHubStorageError as exc:
+                        st.error(f"GitHub save failed: {exc}")
+                    except Exception as exc:
+                        st.error(f"Unexpected GitHub save error: {exc}")
+                    else:
+                        # Persist succeeded. Clear the local staging queue immediately so the
+                        # current browser session cannot accidentally re-commit the same batch.
+                        st.session_state.uploaded_comps = None
+                        _reset_vision_intake()
+                        st.session_state["github_flash_success"] = (
+                            f"Saved {save_result['staged_count']} staged observation(s) to "
+                            f"{save_result['repo']} on `{save_result['branch']}`. "
+                            f"Database rows: {save_result['remote_before']} → {save_result['remote_after']}. "
+                            "Local pending queue cleared."
                         )
-                    # Force the metrics/UI to redraw now instead of leaving the pre-commit
-                    # pending count visible until a cloud redeploy or manual browser refresh.
-                    st.cache_data.clear()
+                        if save_result.get("commit_url"):
+                            st.session_state["github_flash_info"] = (
+                                "The batch is permanently stored in GitHub. The app has cleared the local "
+                                "pending queue; opening the GitHub commit is optional. Wait for the GitHub-triggered "
+                                "Streamlit redeploy before starting a new batch so the committed database is loaded locally."
+                            )
+                        else:
+                            st.session_state["github_flash_info"] = (
+                                "The batch is permanently stored in GitHub and the local pending queue is cleared. "
+                                "Wait for the GitHub-triggered Streamlit redeploy before starting a new batch so the "
+                                "committed database is loaded locally."
+                            )
+                        # Force the metrics/UI to redraw now instead of leaving the pre-commit
+                        # pending count visible until a cloud redeploy or manual browser refresh.
+                        st.cache_data.clear()
                     st.rerun()
 
     st.divider()
@@ -1433,7 +1471,7 @@ else:
     st.subheader("Methodology")
     st.markdown(
         """
-### v0.4.4 approach
+### v0.4.5 approach
 
 The pricing model estimates a market-supported bottle-price range from a weighted comparable set, then applies deliberately modest wine-specific and public-market adjustments.
 
@@ -1453,6 +1491,6 @@ The model is a market-positioning aid, not a guarantee of demand or sell-through
 
 **Screenshot Intake** uses the OpenAI Responses API on screenshots explicitly uploaded by an administrator. The AI extracts visible facts only; deterministic classification rules are applied afterward; a human must review/edit the proposed row before it is added to the session comp database.
 
-**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. v0.4.x adds an AI interpretation fallback for selected product pages: strong provider/structured facts remain authoritative, while AI can interpret already-downloaded legacy/noisy HTML and must return field-level evidence. AI does not make an additional winery-site request. v0.4.2 added an explicit rendered-page fallback for JavaScript storefronts only after the static path fails; it is manual, does not click/login/bypass challenges, and the rendered DOM re-enters the same canonical pipeline. v0.4.3 streamlined the catalog-scan UI with progressive disclosure. v0.4.4 consolidates optional scan controls/safeguards, hides reset actions until they are relevant, and applies the same progressive-disclosure pattern to Screenshot Intake without changing extraction logic. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
+**Experimental Winery Catalog Scan** prefers documented provider feeds when a recognized commerce platform exposes one. For VinoShipper, the documented Product Feed can supply product records directly once the producer ID is detected or entered, avoiding browser automation and reducing page requests. Other sites retain the user-initiated exact-page workflow: same-site product links may be discovered without opening them, and individual product pages are fetched only when explicitly selected. v0.4.x adds an AI interpretation fallback for selected product pages: strong provider/structured facts remain authoritative, while AI can interpret already-downloaded legacy/noisy HTML and must return field-level evidence. AI does not make an additional winery-site request. v0.4.2 added an explicit rendered-page fallback for JavaScript storefronts only after the static path fails; it is manual, does not click/login/bypass challenges, and the rendered DOM re-enters the same canonical pipeline. v0.4.3 streamlined the catalog-scan UI with progressive disclosure. v0.4.4 consolidated optional scan controls/safeguards and applied progressive disclosure to Screenshot Intake. v0.4.5 continues that UI-only cleanup by presenting upload/paste as parallel intake methods, adding a provenance hint for Source URL, and consolidating database source coverage, workbook/manual additions, pending-batch review, and GitHub persistence into one progressive workflow without changing extraction logic. Reviewed rows may be staged into the normal pending comp batch, but nothing becomes permanent until the administrator uses the GitHub batch-commit control. The scanner does not bypass access controls or automatically retry rate limits.
         """
     )
